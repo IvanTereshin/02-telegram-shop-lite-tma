@@ -7,28 +7,42 @@ import { loadState, saveState } from './lib/storage';
 import type {
   CartItem,
   CategoryId,
+  AppSettings,
   CheckoutForm,
   Order,
   OrderStatus,
+  PaymentMethod,
+  PaymentMode,
+  PaymentStatus,
   Product,
   SortMode,
 } from './types';
 
-type View = 'shop' | 'cart' | 'checkout' | 'success' | 'orders' | 'admin';
+type View = 'shop' | 'cart' | 'checkout' | 'success' | 'orders' | 'admin' | 'settings';
 
 const STORAGE_KEYS = {
   products: 'telegram-shop-lite-products-v1',
   cart: 'telegram-shop-lite-cart-v1',
   orders: 'telegram-shop-lite-orders-v1',
   checkout: 'telegram-shop-lite-checkout-v1',
+  settings: 'telegram-shop-lite-settings-v2',
 };
 
 const defaultCheckout: CheckoutForm = {
   deliveryType: 'delivery',
+  paymentMethod: 'sbp',
   name: 'Иван',
   phone: '+7 900 120-40-20',
   address: 'Новокузнецк, ул. Кирова, 55',
   comment: '',
+};
+
+const defaultSettings: AppSettings = {
+  paymentMode: 'test',
+  defaultPaymentMethod: 'sbp',
+  fiscalReceipts: true,
+  telegramUpdates: true,
+  merchantLabel: 'Kamenka Goods · ShopID demo-2048',
 };
 
 const statusFlow: OrderStatus[] = ['new', 'paid', 'packing', 'courier', 'pickupReady', 'done'];
@@ -38,6 +52,65 @@ const brand = {
   delivery: 'Доставка сегодня с 12:00 до 21:00',
   area: 'Новокузнецк · центр и ближние районы',
   rating: '4.86',
+};
+
+type PaymentSession = {
+  id: string;
+  method: PaymentMethod;
+  endpoint: string;
+  action: string;
+};
+
+const paymentMethods: Array<{
+  id: PaymentMethod;
+  title: string;
+  short: string;
+  description: string;
+  endpoint: string;
+}> = [
+  {
+    id: 'telegram-stars',
+    title: 'Telegram Stars',
+    short: 'XTR',
+    description: 'Для цифровых подарочных сертификатов и подписок внутри Telegram.',
+    endpoint: '/api/payments/telegram-stars/invoice',
+  },
+  {
+    id: 'sbp',
+    title: 'СБП',
+    short: 'QR / банк',
+    description: 'ЮKassa создает redirect на оплату через приложение банка.',
+    endpoint: '/api/payments/yookassa/sbp',
+  },
+  {
+    id: 'yookassa',
+    title: 'ЮKassa',
+    short: 'Карта / SberPay',
+    description: 'Оплата картой, SberPay или другим способом на форме ЮKassa.',
+    endpoint: '/api/payments/yookassa/checkout',
+  },
+];
+
+const getPaymentMethod = (id: PaymentMethod) => paymentMethods.find((method) => method.id === id) ?? paymentMethods[0];
+
+const createPaymentSession = async (
+  method: PaymentMethod,
+  amount: number,
+  mode: PaymentMode,
+): Promise<PaymentSession> => {
+  await new Promise((resolve) => window.setTimeout(resolve, 420));
+  const paymentMethod = getPaymentMethod(method);
+  return {
+    id: `${mode}-${method}-${Date.now()}-${amount}`,
+    method,
+    endpoint: paymentMethod.endpoint,
+    action:
+      method === 'telegram-stars'
+        ? 'Открыть invoice в Telegram'
+        : method === 'sbp'
+          ? 'Открыть банк или QR'
+          : 'Открыть форму оплаты',
+  };
 };
 
 function useReducedMotionPreference() {
@@ -70,6 +143,10 @@ function getInitialCheckout() {
   return loadState<CheckoutForm>(STORAGE_KEYS.checkout, defaultCheckout);
 }
 
+function getInitialSettings() {
+  return loadState<AppSettings>(STORAGE_KEYS.settings, defaultSettings);
+}
+
 function App() {
   const shellRef = useRef<HTMLElement>(null);
   const [view, setView] = useState<View>('shop');
@@ -77,6 +154,7 @@ function App() {
   const [cart, setCart] = useState<CartItem[]>(getInitialCart);
   const [orders, setOrders] = useState<Order[]>(getInitialOrders);
   const [checkout, setCheckout] = useState<CheckoutForm>(getInitialCheckout);
+  const [settings, setSettings] = useState<AppSettings>(getInitialSettings);
   const [category, setCategory] = useState<CategoryId>('all');
   const [search, setSearch] = useState('');
   const [sort, setSort] = useState<SortMode>('popular');
@@ -90,6 +168,11 @@ function App() {
   useEffect(() => saveState(STORAGE_KEYS.cart, cart), [cart]);
   useEffect(() => saveState(STORAGE_KEYS.orders, orders), [orders]);
   useEffect(() => saveState(STORAGE_KEYS.checkout, checkout), [checkout]);
+  useEffect(() => saveState(STORAGE_KEYS.settings, settings), [settings]);
+
+  useEffect(() => {
+    setCheckout((current) => ({ ...current, paymentMethod: settings.defaultPaymentMethod }));
+  }, [settings.defaultPaymentMethod]);
 
   const selectedProduct = products.find((product) => product.id === selectedProductId) ?? null;
 
@@ -193,7 +276,10 @@ function App() {
     const order: Order = {
       id: orderId,
       createdAt: new Date().toISOString(),
-      status: 'new',
+      status: 'paid',
+      paymentMethod: checkout.paymentMethod,
+      paymentStatus: 'paid',
+      paymentProviderId: `paid-${checkout.paymentMethod}-${Date.now()}`,
       deliveryType: checkout.deliveryType,
       contactName: checkout.name,
       phone: checkout.phone,
@@ -269,6 +355,7 @@ function App() {
           <NavButton active={view === 'shop'} label="Каталог" onClick={() => setView('shop')} />
           <NavButton active={view === 'cart'} label={`Корзина ${cartCount || ''}`} onClick={() => setView('cart')} />
           <NavButton active={view === 'orders'} label="Заказы" onClick={() => setView('orders')} />
+          <NavButton active={view === 'settings'} label="Настройки" onClick={() => setView('settings')} />
         </nav>
 
         <div className="content">
@@ -313,6 +400,7 @@ function App() {
               discount={discount}
               subtotal={subtotal}
               total={total}
+              settings={settings}
               onBack={() => setView('cart')}
               onChange={setCheckout}
               onPlaceOrder={placeOrder}
@@ -336,6 +424,13 @@ function App() {
               onBack={() => setView('shop')}
               onStatusChange={updateOrderStatus}
               onStockChange={updateStock}
+            />
+          )}
+
+          {view === 'settings' && (
+            <SettingsView
+              settings={settings}
+              onChange={setSettings}
             />
           )}
         </div>
@@ -691,6 +786,7 @@ interface CheckoutViewProps {
   discount: number;
   subtotal: number;
   total: number;
+  settings: AppSettings;
   onBack: () => void;
   onChange: (value: CheckoutForm) => void;
   onPlaceOrder: () => void;
@@ -703,12 +799,37 @@ function CheckoutView({
   discount,
   subtotal,
   total,
+  settings,
   onBack,
   onChange,
   onPlaceOrder,
 }: CheckoutViewProps) {
+  const [paymentStatus, setPaymentStatus] = useState<PaymentStatus>('draft');
+  const [paymentSession, setPaymentSession] = useState<PaymentSession | null>(null);
+  const [isCreatingPayment, setIsCreatingPayment] = useState(false);
+
   function updateField<K extends keyof CheckoutForm>(key: K, value: CheckoutForm[K]) {
     onChange({ ...checkout, [key]: value });
+  }
+
+  useEffect(() => {
+    setPaymentStatus('draft');
+    setPaymentSession(null);
+  }, [checkout.paymentMethod, settings.paymentMode, total]);
+
+  async function handlePaymentAction() {
+    if (!checkoutReady || total <= 0) return;
+
+    if (paymentStatus === 'invoice') {
+      setPaymentStatus('paid');
+      return;
+    }
+
+    setIsCreatingPayment(true);
+    const session = await createPaymentSession(checkout.paymentMethod, total, settings.paymentMode);
+    setPaymentSession(session);
+    setPaymentStatus('invoice');
+    setIsCreatingPayment(false);
   }
 
   return (
@@ -721,7 +842,7 @@ function CheckoutView({
       <div className="checkout-steps" aria-label="Шаги оформления">
         <span className="done">Доставка</span>
         <span className={checkoutReady ? 'done' : ''}>Контакты</span>
-        <span>Оплата</span>
+        <span className={paymentStatus === 'paid' ? 'done' : ''}>Оплата</span>
       </div>
 
       <div className="delivery-toggle" role="group" aria-label="Способ получения">
@@ -755,15 +876,92 @@ function CheckoutView({
 
       <OrderSummary subtotal={subtotal} discount={discount} deliveryFee={deliveryFee} total={total} />
 
-      <div className="payment-note">
-        <strong>Mock invoice</strong>
-        <span>Создадим заказ в статусе new: invoice draft, waiting payment, paid.</span>
-      </div>
+      <PaymentPanel
+        method={checkout.paymentMethod}
+        mode={settings.paymentMode}
+        session={paymentSession}
+        status={paymentStatus}
+        total={total}
+        disabled={!checkoutReady}
+        isLoading={isCreatingPayment}
+        onAction={handlePaymentAction}
+        onMethodChange={(method) => updateField('paymentMethod', method)}
+      />
 
-      <button className="primary-button sticky-action" type="button" disabled={!checkoutReady} onClick={onPlaceOrder}>
+      <button
+        className="primary-button sticky-action"
+        type="button"
+        disabled={!checkoutReady || paymentStatus !== 'paid'}
+        onClick={onPlaceOrder}
+      >
         Создать заказ · {formatPrice(total)}
       </button>
     </div>
+  );
+}
+
+interface PaymentPanelProps {
+  method: PaymentMethod;
+  mode: PaymentMode;
+  session: PaymentSession | null;
+  status: PaymentStatus;
+  total: number;
+  disabled: boolean;
+  isLoading: boolean;
+  onAction: () => void;
+  onMethodChange: (method: PaymentMethod) => void;
+}
+
+function PaymentPanel({
+  method,
+  mode,
+  session,
+  status,
+  total,
+  disabled,
+  isLoading,
+  onAction,
+  onMethodChange,
+}: PaymentPanelProps) {
+  const selectedMethod = getPaymentMethod(method);
+  const actionLabel =
+    status === 'paid'
+      ? 'Оплата подтверждена'
+      : status === 'invoice'
+        ? 'Подтвердить оплату в демо'
+        : 'Сформировать счет';
+
+  return (
+    <section className="payment-note" aria-label="Оплата заказа">
+      <div className="payment-head">
+        <strong>Оплата</strong>
+        <span>{formatPrice(total)}</span>
+      </div>
+      <div className="payment-methods" role="radiogroup" aria-label="Способ оплаты">
+        {paymentMethods.map((item) => (
+          <button
+            className={item.id === method ? 'payment-method active' : 'payment-method'}
+            type="button"
+            role="radio"
+            aria-checked={item.id === method}
+            disabled={status === 'paid'}
+            key={item.id}
+            onClick={() => onMethodChange(item.id)}
+          >
+            <strong>{item.title}</strong>
+            <span>{item.short}</span>
+          </button>
+        ))}
+      </div>
+      <div className={`payment-state ${status}`}>
+        <strong>{selectedMethod.title} · {mode}</strong>
+        <span>{selectedMethod.description}</span>
+        {session && <code>{session.endpoint} · {session.id}</code>}
+      </div>
+      <button className="secondary-button payment-action" type="button" disabled={disabled || status === 'paid'} onClick={onAction}>
+        {isLoading ? 'Создаем счет' : actionLabel}
+      </button>
+    </section>
   );
 }
 
@@ -791,12 +989,12 @@ function SuccessView({ order, onCatalog, onOrders }: SuccessViewProps) {
   return (
     <div className="screen success-screen">
       <div className="success-mark">✓</div>
-      <h2>Заказ создан</h2>
+      <h2>Заказ оплачен</h2>
       <p>
         {order ? `${order.id} · ${formatPrice(order.total)}` : 'Новый заказ появится в истории.'}
       </p>
       <div className="telegram-status">
-        <strong>Статус уйдет в Telegram</strong>
+        <strong>{order ? getPaymentMethod(order.paymentMethod).title : 'Платеж подтвержден'}</strong>
         <span>Бот отправит номер заказа, чек и следующие обновления.</span>
       </div>
       {order && <OrderTracking status={order.status} />}
@@ -834,6 +1032,10 @@ function OrdersView({ orders }: { orders: Order[] }) {
             <div className="order-footer">
               <strong>{formatPrice(order.total)}</strong>
               <span>{statusMeta[order.status].botText}</span>
+            </div>
+            <div className="payment-line">
+              <span>{getPaymentMethod(order.paymentMethod).title}</span>
+              <strong>{order.paymentStatus}</strong>
             </div>
             <OrderTracking status={order.status} />
           </article>
@@ -895,6 +1097,99 @@ function AdminView({ orders, products, onBack, onStatusChange, onStockChange }: 
             </label>
           ))}
         </div>
+      </section>
+    </div>
+  );
+}
+
+function SettingsView({
+  settings,
+  onChange,
+}: {
+  settings: AppSettings;
+  onChange: (settings: AppSettings) => void;
+}) {
+  const update = <K extends keyof AppSettings>(key: K, value: AppSettings[K]) => {
+    onChange({ ...settings, [key]: value });
+  };
+
+  return (
+    <div className="screen settings-screen">
+      <SectionTitle title="Настройки" subtitle="Платежи, чеки и Telegram-уведомления для production-сценария." />
+
+      <section className="settings-section">
+        <h2>Платежи</h2>
+        <div className="settings-segmented" role="group" aria-label="Режим платежей">
+          <button
+            className={settings.paymentMode === 'test' ? 'active' : ''}
+            type="button"
+            onClick={() => update('paymentMode', 'test')}
+          >
+            Test
+          </button>
+          <button
+            className={settings.paymentMode === 'production' ? 'active' : ''}
+            type="button"
+            onClick={() => update('paymentMode', 'production')}
+          >
+            Production
+          </button>
+        </div>
+        <label className="field">
+          <span>Метод по умолчанию</span>
+          <select
+            value={settings.defaultPaymentMethod}
+            onChange={(event) => update('defaultPaymentMethod', event.target.value as PaymentMethod)}
+          >
+            {paymentMethods.map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.title}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="field">
+          <span>Merchant label</span>
+          <input
+            value={settings.merchantLabel}
+            maxLength={80}
+            onChange={(event) => update('merchantLabel', event.target.value)}
+          />
+        </label>
+      </section>
+
+      <section className="settings-section">
+        <h2>Операции</h2>
+        <label className="settings-toggle">
+          <input
+            type="checkbox"
+            checked={settings.fiscalReceipts}
+            onChange={(event) => update('fiscalReceipts', event.target.checked)}
+          />
+          <span>Формировать чек через ЮKassa после paid webhook</span>
+        </label>
+        <label className="settings-toggle">
+          <input
+            type="checkbox"
+            checked={settings.telegramUpdates}
+            onChange={(event) => update('telegramUpdates', event.target.checked)}
+          />
+          <span>Отправлять статус заказа пользователю в Telegram</span>
+        </label>
+      </section>
+
+      <section className="settings-section">
+        <h2>Backend endpoints</h2>
+        <div className="endpoint-list">
+          {paymentMethods.map((item) => (
+            <code key={item.id}>{item.endpoint}</code>
+          ))}
+          <code>/api/payments/webhook/yookassa</code>
+          <code>/api/telegram/pre-checkout</code>
+        </div>
+        <p>
+          Secret key ЮKassa и bot token хранятся только на сервере. Мини-апп получает invoice link или confirmation_url.
+        </p>
       </section>
     </div>
   );

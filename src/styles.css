@@ -26,6 +26,14 @@
   box-sizing: border-box;
 }
 
+:where(.phone-shell, .screen, section, article, div, header, nav, button, label, input, select, textarea) {
+  min-width: 0;
+}
+
+:where(h1, h2, h3, p, span, strong, small, button, label, code, input, select, textarea) {
+  overflow-wrap: anywhere;
+}
+
 body {
   margin: 0;
   min-width: 320px;
@@ -91,7 +99,7 @@ button {
   font-size: 22px;
   line-height: 1.1;
   font-weight: 780;
-  letter-spacing: -0.02em;
+  letter-spacing: 0;
 }
 
 .tg-caption {
@@ -122,7 +130,7 @@ button {
   top: 69px;
   z-index: 19;
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 6px;
   padding: 8px 16px;
   background: rgb(247 248 250 / 92%);
@@ -135,8 +143,9 @@ button {
   color: var(--muted);
   background: transparent;
   border-radius: 12px;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 720;
+  line-height: 1.15;
 }
 
 .tab.active {
@@ -198,7 +207,7 @@ button {
 .hero-copy strong {
   font-size: 28px;
   line-height: 1.18;
-  letter-spacing: -0.03em;
+  letter-spacing: 0;
 }
 
 .store-strip {
@@ -258,7 +267,7 @@ button {
   color: var(--text);
   font-size: 22px;
   line-height: 1.05;
-  letter-spacing: -0.025em;
+  letter-spacing: 0;
 }
 
 .featured-product button {
@@ -779,7 +788,7 @@ button {
 .telegram-status,
 .empty-state {
   display: grid;
-  gap: 5px;
+  gap: 10px;
 }
 
 .payment-note strong,
@@ -794,6 +803,90 @@ button {
   color: var(--muted);
   font-size: 13px;
   line-height: 1.45;
+}
+
+.payment-head,
+.payment-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.payment-head span,
+.payment-line strong {
+  flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
+}
+
+.payment-methods {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.payment-method {
+  display: grid;
+  min-height: 76px;
+  align-content: start;
+  gap: 5px;
+  padding: 9px;
+  color: var(--text);
+  background: #fbf2e8;
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  text-align: left;
+}
+
+.payment-method.active {
+  color: var(--cream);
+  background: var(--coffee);
+  border-color: var(--coffee);
+}
+
+.payment-method strong {
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.payment-method span {
+  font-size: 11px;
+  line-height: 1.25;
+}
+
+.payment-state {
+  display: grid;
+  gap: 4px;
+  padding: 10px;
+  background: #fbf2e8;
+  border: 1px solid var(--line);
+  border-radius: 13px;
+}
+
+.payment-state.invoice {
+  border-color: rgb(169 105 36 / 42%);
+}
+
+.payment-state.paid {
+  background: #edf0d3;
+  border-color: rgb(89 99 39 / 42%);
+}
+
+.payment-state code,
+.endpoint-list code {
+  display: block;
+  padding: 7px 8px;
+  color: #5d3928;
+  background: #f0e0d1;
+  border-radius: 9px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.35;
+  white-space: normal;
+}
+
+.payment-action {
+  min-height: 42px;
 }
 
 .success-screen {
@@ -932,6 +1025,19 @@ button {
   font-size: 12px;
   line-height: 1.4;
   text-align: right;
+}
+
+.payment-line {
+  padding: 9px 10px;
+  color: var(--muted);
+  background: #fbf2e8;
+  border-radius: 12px;
+  font-size: 12px;
+}
+
+.payment-line strong {
+  color: var(--coffee);
+  text-transform: uppercase;
 }
 
 .admin-section {
@@ -1108,6 +1214,75 @@ button {
   color: var(--muted);
 }
 
+.settings-screen {
+  gap: 12px;
+}
+
+.settings-section {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+}
+
+.settings-section h2 {
+  margin: 0;
+  font-size: 18px;
+  line-height: 1.2;
+}
+
+.settings-section p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.settings-segmented {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  padding: 4px;
+  background: #eadbc9;
+  border-radius: 14px;
+}
+
+.settings-segmented button {
+  min-height: 38px;
+  color: var(--muted);
+  background: transparent;
+  border-radius: 11px;
+  font-weight: 780;
+}
+
+.settings-segmented button.active {
+  color: var(--text);
+  background: var(--surface);
+}
+
+.settings-toggle {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  gap: 9px;
+  align-items: start;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.settings-toggle input {
+  width: 18px;
+  min-height: 18px;
+  margin: 1px 0 0;
+}
+
+.endpoint-list {
+  display: grid;
+  gap: 7px;
+}
+
 .image-fallback {
   display: grid;
   place-items: center;
@@ -1147,6 +1322,19 @@ button {
 @media (max-width: 370px) {
   .search-row {
     grid-template-columns: 1fr;
+  }
+
+  .payment-methods {
+    grid-template-columns: 1fr;
+  }
+
+  .tabbar {
+    gap: 4px;
+    padding-inline: 10px;
+  }
+
+  .tab {
+    font-size: 11px;
   }
 
   .product-grid {

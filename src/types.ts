@@ -2,6 +2,12 @@ export type CategoryId = 'all' | 'drinks' | 'home' | 'stationery' | 'bags' | 'se
 
 export type DeliveryType = 'delivery' | 'pickup';
 
+export type PaymentMethod = 'telegram-stars' | 'sbp' | 'yookassa';
+
+export type PaymentMode = 'test' | 'production';
+
+export type PaymentStatus = 'draft' | 'invoice' | 'paid';
+
 export type SortMode = 'popular' | 'priceAsc' | 'priceDesc' | 'stock';
 
 export type OrderStatus = 'new' | 'paid' | 'packing' | 'courier' | 'pickupReady' | 'done';
@@ -35,10 +41,19 @@ export interface CartItem {
 
 export interface CheckoutForm {
   deliveryType: DeliveryType;
+  paymentMethod: PaymentMethod;
   name: string;
   phone: string;
   address: string;
   comment: string;
+}
+
+export interface AppSettings {
+  paymentMode: PaymentMode;
+  defaultPaymentMethod: PaymentMethod;
+  fiscalReceipts: boolean;
+  telegramUpdates: boolean;
+  merchantLabel: string;
 }
 
 export interface OrderItem {
@@ -52,6 +67,9 @@ export interface Order {
   id: string;
   createdAt: string;
   status: OrderStatus;
+  paymentMethod: PaymentMethod;
+  paymentStatus: PaymentStatus;
+  paymentProviderId: string;
   deliveryType: DeliveryType;
   contactName: string;
   phone: string;
