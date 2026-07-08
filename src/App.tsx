@@ -1,4 +1,6 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import gsap from 'gsap';
+import { useGSAP } from '@gsap/react';
 import { categories, demoOrders, demoProducts } from './data/catalog';
 import { formatDate, formatPrice, statusMeta } from './lib/format';
 import { loadState, saveState } from './lib/storage';
@@ -30,6 +32,27 @@ const defaultCheckout: CheckoutForm = {
 };
 
 const statusFlow: OrderStatus[] = ['new', 'paid', 'packing', 'courier', 'pickupReady', 'done'];
+const brand = {
+  name: 'Kamenka Goods',
+  subtitle: 'кофе, домашние вещи и подарки на каждый день',
+  delivery: 'Доставка сегодня с 12:00 до 21:00',
+  area: 'Новокузнецк · центр и ближние районы',
+  rating: '4.86',
+};
+
+function useReducedMotionPreference() {
+  const [reduced, setReduced] = useState(false);
+
+  useEffect(() => {
+    const media = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const update = () => setReduced(media.matches);
+    update();
+    media.addEventListener('change', update);
+    return () => media.removeEventListener('change', update);
+  }, []);
+
+  return reduced;
+}
 
 function getInitialProducts() {
   return loadState<Product[]>(STORAGE_KEYS.products, demoProducts);
@@ -48,6 +71,7 @@ function getInitialCheckout() {
 }
 
 function App() {
+  const shellRef = useRef<HTMLElement>(null);
   const [view, setView] = useState<View>('shop');
   const [products, setProducts] = useState<Product[]>(getInitialProducts);
   const [cart, setCart] = useState<CartItem[]>(getInitialCart);
@@ -59,6 +83,8 @@ function App() {
   const [promo, setPromo] = useState('TMA10');
   const [selectedProductId, setSelectedProductId] = useState<string | null>(null);
   const [lastOrderId, setLastOrderId] = useState<string | null>(null);
+  const [favoriteIds, setFavoriteIds] = useState<string[]>([]);
+  const reducedMotion = useReducedMotionPreference();
 
   useEffect(() => saveState(STORAGE_KEYS.products, products), [products]);
   useEffect(() => saveState(STORAGE_KEYS.cart, cart), [cart]);
@@ -106,6 +132,21 @@ function App() {
   const cartCount = cartLines.reduce((sum, line) => sum + line.quantity, 0);
   const lastOrder = orders.find((order) => order.id === lastOrderId) ?? null;
 
+  useGSAP(
+    () => {
+      if (reducedMotion) return;
+      gsap.fromTo(
+        '.content .screen > *, .product-drawer',
+        { autoAlpha: 0, y: 18 },
+        { autoAlpha: 1, y: 0, duration: 0.42, ease: 'power3.out', stagger: 0.04 },
+      );
+      if (cartCount > 0) {
+        gsap.fromTo('.floating-cart', { scale: 0.96 }, { scale: 1, duration: 0.28, ease: 'back.out(1.8)' });
+      }
+    },
+    { dependencies: [view, selectedProductId, cartCount, reducedMotion], scope: shellRef, revertOnUpdate: true },
+  );
+
   function addToCart(productId: string, quantity = 1) {
     const product = products.find((current) => current.id === productId);
     if (!product || product.stock <= 0) return;
@@ -123,6 +164,12 @@ function App() {
 
       return [...currentCart, { productId, quantity: nextQuantity }];
     });
+  }
+
+  function toggleFavorite(productId: string) {
+    setFavoriteIds((current) =>
+      current.includes(productId) ? current.filter((item) => item !== productId) : [...current, productId],
+    );
   }
 
   function updateCart(productId: string, quantity: number) {
@@ -207,11 +254,11 @@ function App() {
 
   return (
     <main className="app-root">
-      <section className="phone-shell" aria-label="Telegram Shop Lite">
+      <section className="phone-shell" aria-label="Telegram Shop Lite" ref={shellRef}>
         <header className="topbar">
           <div>
-            <p className="tg-caption">Telegram Mini App</p>
-            <h1>Shop Lite</h1>
+            <p className="tg-caption">Telegram Mini App · curated store</p>
+            <h1>{brand.name}</h1>
           </div>
           <button className="ghost-button" type="button" onClick={() => setView('admin')}>
             Admin
@@ -229,6 +276,7 @@ function App() {
             <CatalogView
               cartCount={cartCount}
               category={category}
+              favoriteIds={favoriteIds}
               products={filteredProducts}
               search={search}
               sort={sort}
@@ -239,6 +287,7 @@ function App() {
               onOpenProduct={setSelectedProductId}
               onSearchChange={setSearch}
               onSortChange={setSort}
+              onToggleFavorite={toggleFavorite}
             />
           )}
 
@@ -321,6 +370,7 @@ function NavButton({ active, label, onClick }: NavButtonProps) {
 interface CatalogViewProps {
   cartCount: number;
   category: CategoryId;
+  favoriteIds: string[];
   products: Product[];
   search: string;
   sort: SortMode;
@@ -331,11 +381,13 @@ interface CatalogViewProps {
   onOpenProduct: (productId: string) => void;
   onSearchChange: (value: string) => void;
   onSortChange: (value: SortMode) => void;
+  onToggleFavorite: (productId: string) => void;
 }
 
 function CatalogView({
   cartCount,
   category,
+  favoriteIds,
   products,
   search,
   sort,
@@ -346,17 +398,49 @@ function CatalogView({
   onOpenProduct,
   onSearchChange,
   onSortChange,
+  onToggleFavorite,
 }: CatalogViewProps) {
+  const featured = products.find((product) => product.id === 'kit-morning') ?? products[0];
+
   return (
     <div className="screen">
       <section className="shop-hero">
         <ImageFallback src="/assets/shop-hero.png" title="Shop Lite" className="hero-media" />
         <div className="hero-copy">
-          <p>Сегодня в магазине</p>
-          <strong>12 товаров для дома, работы и подарков</strong>
-          <span>Доставка от 45 минут · самовывоз без очереди</span>
+          <p>{brand.area}</p>
+          <strong>{brand.name}</strong>
+          <span>{brand.subtitle}</span>
         </div>
       </section>
+
+      <section className="store-strip" aria-label="Условия магазина">
+        <span>
+          <strong>{brand.rating}</strong>
+          рейтинг
+        </span>
+        <span>
+          <strong>45-90 мин</strong>
+          быстрая доставка
+        </span>
+        <span>
+          <strong>2 500 ₽</strong>
+          бесплатно от суммы
+        </span>
+      </section>
+
+      {featured && (
+        <section className="featured-product">
+          <div>
+            <p>Выбор магазина</p>
+            <h2>{featured.title}</h2>
+            <span>{featured.short}</span>
+            <button type="button" onClick={() => onOpenProduct(featured.id)}>
+              Смотреть набор
+            </button>
+          </div>
+          <ImageFallback src={featured.image} title={featured.title} className="featured-image" />
+        </section>
+      )}
 
       <div className="search-row">
         <label className="search-box">
@@ -403,8 +487,10 @@ function CatalogView({
           <ProductCard
             key={product.id}
             product={product}
+            isFavorite={favoriteIds.includes(product.id)}
             onAdd={() => onAdd(product.id)}
             onOpen={() => onOpenProduct(product.id)}
+            onToggleFavorite={() => onToggleFavorite(product.id)}
           />
         ))}
       </section>
@@ -425,17 +511,29 @@ function CatalogView({
 
 interface ProductCardProps {
   product: Product;
+  isFavorite: boolean;
   onAdd: () => void;
   onOpen: () => void;
+  onToggleFavorite: () => void;
 }
 
-function ProductCard({ product, onAdd, onOpen }: ProductCardProps) {
+function ProductCard({ product, isFavorite, onAdd, onOpen, onToggleFavorite }: ProductCardProps) {
   const soldOut = product.stock === 0;
+  const badge = product.stock <= 4 ? 'low stock' : product.oldPrice ? 'sale' : product.popular > 90 ? 'bestseller' : 'curated';
 
   return (
     <article className={soldOut ? 'product-card sold-out' : 'product-card'}>
       <button className="product-image-button" type="button" onClick={onOpen}>
         <ImageFallback src={product.image} title={product.title} className="product-image" />
+        <span className={`product-badge ${badge.replace(' ', '-')}`}>{badge}</span>
+      </button>
+      <button
+        className={isFavorite ? 'favorite-button active' : 'favorite-button'}
+        type="button"
+        aria-label={isFavorite ? 'Убрать из избранного' : 'Добавить в избранное'}
+        onClick={onToggleFavorite}
+      >
+        {isFavorite ? 'saved' : 'save'}
       </button>
       <button className="product-info" type="button" onClick={onOpen}>
         <span className="product-meta">
@@ -480,6 +578,15 @@ function ProductDetail({ product, cartQuantity, onAdd, onClose }: ProductDetailP
           <strong>{formatPrice(product.price)}</strong>
         </div>
         <p className="detail-description">{product.description}</p>
+        <div className="variant-panel">
+          <span>Вариант</span>
+          <div>
+            <button type="button" className="selected">
+              {product.weight}
+            </button>
+            <button type="button">Подарочная упаковка</button>
+          </div>
+        </div>
         <div className="tag-row">
           {product.tags.map((tag) => (
             <span key={tag}>{tag}</span>
@@ -488,6 +595,10 @@ function ProductDetail({ product, cartQuantity, onAdd, onClose }: ProductDetailP
         <div className="stock-note">
           <span>Остаток</span>
           <strong>{product.stock} шт.</strong>
+        </div>
+        <div className="pair-note">
+          <strong>Часто берут вместе</strong>
+          <span>Чай + блокнот или свеча дают готовый подарок без лишней упаковки.</span>
         </div>
         <button className="primary-button" type="button" disabled={!canAdd} onClick={() => onAdd(product.id)}>
           {canAdd ? 'Добавить в корзину' : 'Максимум в корзине'}
@@ -607,6 +718,12 @@ function CheckoutView({
       </button>
       <SectionTitle title="Checkout" subtitle="Минимум шагов: контакт, способ получения и комментарий." />
 
+      <div className="checkout-steps" aria-label="Шаги оформления">
+        <span className="done">Доставка</span>
+        <span className={checkoutReady ? 'done' : ''}>Контакты</span>
+        <span>Оплата</span>
+      </div>
+
       <div className="delivery-toggle" role="group" aria-label="Способ получения">
         <DeliveryButton
           active={checkout.deliveryType === 'delivery'}
@@ -639,8 +756,8 @@ function CheckoutView({
       <OrderSummary subtotal={subtotal} discount={discount} deliveryFee={deliveryFee} total={total} />
 
       <div className="payment-note">
-        <strong>Demo payment</strong>
-        <span>В production здесь будет Telegram Payments invoice или внешний provider.</span>
+        <strong>Mock invoice</strong>
+        <span>Создадим заказ в статусе new: invoice draft, waiting payment, paid.</span>
       </div>
 
       <button className="primary-button sticky-action" type="button" disabled={!checkoutReady} onClick={onPlaceOrder}>
@@ -682,6 +799,7 @@ function SuccessView({ order, onCatalog, onOrders }: SuccessViewProps) {
         <strong>Статус уйдет в Telegram</strong>
         <span>Бот отправит номер заказа, чек и следующие обновления.</span>
       </div>
+      {order && <OrderTracking status={order.status} />}
       <button className="primary-button" type="button" onClick={onOrders}>
         Открыть историю
       </button>
@@ -717,6 +835,7 @@ function OrdersView({ orders }: { orders: Order[] }) {
               <strong>{formatPrice(order.total)}</strong>
               <span>{statusMeta[order.status].botText}</span>
             </div>
+            <OrderTracking status={order.status} />
           </article>
         ))}
       </div>
@@ -828,6 +947,20 @@ function SummaryRow({ label, value }: { label: string; value: number }) {
 
 function StatusPill({ status }: { status: OrderStatus }) {
   return <span className={`status-pill ${statusMeta[status].tone}`}>{statusMeta[status].title}</span>;
+}
+
+function OrderTracking({ status }: { status: OrderStatus }) {
+  const activeIndex = statusFlow.indexOf(status);
+
+  return (
+    <div className="tracking-steps" aria-label="Статус заказа">
+      {statusFlow.map((item, index) => (
+        <span className={index <= activeIndex ? 'active' : ''} key={item}>
+          {statusMeta[item].title}
+        </span>
+      ))}
+    </div>
+  );
 }
 
 function SectionTitle({ title, subtitle }: { title: string; subtitle: string }) {
