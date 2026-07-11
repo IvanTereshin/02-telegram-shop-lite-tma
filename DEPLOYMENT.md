@@ -23,5 +23,7 @@ Target public URL:
 https://tma-02-shop.ivantereshin-test.store
 ```
 
-The container is production-ready locally behind Traefik. Public HTTPS requires DNS
-`*.ivantereshin-test.store` to point to the machine that runs Traefik.
+Health probe: `GET /healthz` возвращает `200 ok`.
+
+The container is a production-built portfolio demo behind Traefik. Product state and
+payment are still local simulations; see `PRODUCTION_CHECKLIST.md` before real launch.

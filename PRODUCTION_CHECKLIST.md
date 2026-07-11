@@ -23,6 +23,10 @@
 - Store `paymentStatus`, provider id and order status separately.
 - Send fiscal receipt only after confirmed paid webhook.
 - Test mobile widths: 320, 360, 390 and 430 px.
+- Replace local catalog/cart/order state with authenticated server-side storage.
+- Reserve stock atomically when the order is created and release it on expiry/cancel.
+- Keep the current `demo-*` payment labels until webhook-confirmed payments exist.
+- Preserve order activity as an append-only backend audit log.
 
 ## References
 

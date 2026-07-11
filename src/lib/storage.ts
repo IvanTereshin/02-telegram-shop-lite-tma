@@ -8,5 +8,17 @@ export function loadState<T>(key: string, fallback: T): T {
 }
 
 export function saveState<T>(key: string, value: T) {
-  localStorage.setItem(key, JSON.stringify(value));
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // The demo stays usable when storage is blocked or full.
+  }
+}
+
+export function removeState(key: string) {
+  try {
+    localStorage.removeItem(key);
+  } catch {
+    // Storage is an enhancement, not a runtime dependency.
+  }
 }

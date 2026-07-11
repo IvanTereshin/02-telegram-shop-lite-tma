@@ -1,1299 +1,325 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import gsap from 'gsap';
 import { useGSAP } from '@gsap/react';
-import { categories, demoOrders, demoProducts } from './data/catalog';
+import { categories, deliveryWindows, demoOrders, demoProducts } from './data/catalog';
 import { formatDate, formatPrice, statusMeta } from './lib/format';
 import { loadState, saveState } from './lib/storage';
+import {
+  FREE_DELIVERY_MINIMUM,
+  ORDER_MINIMUM,
+  cartKey,
+  getDeliveryFee,
+  getUnitPrice,
+  getVariant,
+  normalizeCart,
+  validateCheckout,
+} from './lib/shop';
 import type {
+  AppSettings,
   CartItem,
   CategoryId,
-  AppSettings,
   CheckoutForm,
   Order,
   OrderStatus,
   PaymentMethod,
-  PaymentMode,
-  PaymentStatus,
   Product,
   SortMode,
 } from './types';
 
-type View = 'shop' | 'cart' | 'checkout' | 'success' | 'orders' | 'admin' | 'settings';
+type View = 'shop' | 'favorites' | 'cart' | 'checkout' | 'orders' | 'admin';
+type CatalogState = 'loading' | 'ready' | 'error';
+type CheckoutErrors = ReturnType<typeof validateCheckout>;
 
-const STORAGE_KEYS = {
-  products: 'telegram-shop-lite-products-v1',
-  cart: 'telegram-shop-lite-cart-v1',
-  orders: 'telegram-shop-lite-orders-v1',
-  checkout: 'telegram-shop-lite-checkout-v1',
-  settings: 'telegram-shop-lite-settings-v2',
+const STORAGE = {
+  cart: 'kamenka-cart-v3', favorites: 'kamenka-favorites-v1', orders: 'kamenka-orders-v3',
+  checkout: 'kamenka-checkout-v2', settings: 'kamenka-settings-v1', products: 'kamenka-products-v1',
 };
 
 const defaultCheckout: CheckoutForm = {
-  deliveryType: 'delivery',
-  paymentMethod: 'sbp',
-  name: 'Иван',
-  phone: '+7 900 120-40-20',
-  address: 'Новокузнецк, ул. Кирова, 55',
-  comment: '',
+  deliveryType: 'delivery', deliveryWindowId: 'today-evening', paymentMethod: 'demo-sbp',
+  name: '', phone: '', address: '', comment: '',
 };
-
 const defaultSettings: AppSettings = {
-  paymentMode: 'test',
-  defaultPaymentMethod: 'sbp',
-  fiscalReceipts: true,
-  telegramUpdates: true,
-  merchantLabel: 'Kamenka Goods · ShopID demo-2048',
+  defaultPaymentMethod: 'demo-sbp', telegramUpdates: true, merchantLabel: 'Kamenka · demo store',
 };
-
 const statusFlow: OrderStatus[] = ['new', 'paid', 'packing', 'courier', 'pickupReady', 'done'];
-const brand = {
-  name: 'Kamenka Goods',
-  subtitle: 'кофе, домашние вещи и подарки на каждый день',
-  delivery: 'Доставка сегодня с 12:00 до 21:00',
-  area: 'Новокузнецк · центр и ближние районы',
-  rating: '4.86',
-};
-
-type PaymentSession = {
-  id: string;
-  method: PaymentMethod;
-  endpoint: string;
-  action: string;
-};
-
-const paymentMethods: Array<{
-  id: PaymentMethod;
-  title: string;
-  short: string;
-  description: string;
-  endpoint: string;
-}> = [
-  {
-    id: 'telegram-stars',
-    title: 'Telegram Stars',
-    short: 'XTR',
-    description: 'Для цифровых подарочных сертификатов и подписок внутри Telegram.',
-    endpoint: '/api/payments/telegram-stars/invoice',
-  },
-  {
-    id: 'sbp',
-    title: 'СБП',
-    short: 'QR / банк',
-    description: 'ЮKassa создает redirect на оплату через приложение банка.',
-    endpoint: '/api/payments/yookassa/sbp',
-  },
-  {
-    id: 'yookassa',
-    title: 'ЮKassa',
-    short: 'Карта / SberPay',
-    description: 'Оплата картой, SberPay или другим способом на форме ЮKassa.',
-    endpoint: '/api/payments/yookassa/checkout',
-  },
+const paymentMethods: Array<{ id: PaymentMethod; title: string; note: string }> = [
+  { id: 'demo-sbp', title: 'СБП · демо', note: 'Симуляция подтверждения без банка и списания.' },
+  { id: 'demo-card', title: 'Карта · демо', note: 'Локальная демонстрация, данные карты не запрашиваются.' },
 ];
 
-const getPaymentMethod = (id: PaymentMethod) => paymentMethods.find((method) => method.id === id) ?? paymentMethods[0];
-
-const createPaymentSession = async (
-  method: PaymentMethod,
-  amount: number,
-  mode: PaymentMode,
-): Promise<PaymentSession> => {
-  await new Promise((resolve) => window.setTimeout(resolve, 420));
-  const paymentMethod = getPaymentMethod(method);
-  return {
-    id: `${mode}-${method}-${Date.now()}-${amount}`,
-    method,
-    endpoint: paymentMethod.endpoint,
-    action:
-      method === 'telegram-stars'
-        ? 'Открыть invoice в Telegram'
-        : method === 'sbp'
-          ? 'Открыть банк или QR'
-          : 'Открыть форму оплаты',
-  };
-};
-
-function useReducedMotionPreference() {
+function useReducedMotion() {
   const [reduced, setReduced] = useState(false);
-
   useEffect(() => {
-    const media = window.matchMedia('(prefers-reduced-motion: reduce)');
-    const update = () => setReduced(media.matches);
-    update();
-    media.addEventListener('change', update);
-    return () => media.removeEventListener('change', update);
+    const query = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const update = () => setReduced(query.matches);
+    update(); query.addEventListener('change', update);
+    return () => query.removeEventListener('change', update);
   }, []);
-
   return reduced;
-}
-
-function getInitialProducts() {
-  return loadState<Product[]>(STORAGE_KEYS.products, demoProducts);
-}
-
-function getInitialOrders() {
-  return loadState<Order[]>(STORAGE_KEYS.orders, demoOrders);
-}
-
-function getInitialCart() {
-  return loadState<CartItem[]>(STORAGE_KEYS.cart, []);
-}
-
-function getInitialCheckout() {
-  return loadState<CheckoutForm>(STORAGE_KEYS.checkout, defaultCheckout);
-}
-
-function getInitialSettings() {
-  return loadState<AppSettings>(STORAGE_KEYS.settings, defaultSettings);
 }
 
 function App() {
   const shellRef = useRef<HTMLElement>(null);
   const [view, setView] = useState<View>('shop');
-  const [products, setProducts] = useState<Product[]>(getInitialProducts);
-  const [cart, setCart] = useState<CartItem[]>(getInitialCart);
-  const [orders, setOrders] = useState<Order[]>(getInitialOrders);
-  const [checkout, setCheckout] = useState<CheckoutForm>(getInitialCheckout);
-  const [settings, setSettings] = useState<AppSettings>(getInitialSettings);
+  const [products, setProducts] = useState(() => loadState(STORAGE.products, demoProducts));
+  const [cart, setCart] = useState<CartItem[]>(() => normalizeCart(loadState(STORAGE.cart, []), demoProducts));
+  const [favorites, setFavorites] = useState<string[]>(() => loadState(STORAGE.favorites, []));
+  const [orders, setOrders] = useState<Order[]>(() => loadState(STORAGE.orders, demoOrders));
+  const [checkout, setCheckout] = useState<CheckoutForm>(() => loadState(STORAGE.checkout, defaultCheckout));
+  const [settings] = useState<AppSettings>(() => loadState(STORAGE.settings, defaultSettings));
   const [category, setCategory] = useState<CategoryId>('all');
   const [search, setSearch] = useState('');
-  const [sort, setSort] = useState<SortMode>('popular');
-  const [promo, setPromo] = useState('TMA10');
+  const [sort, setSort] = useState<SortMode>('featured');
   const [selectedProductId, setSelectedProductId] = useState<string | null>(null);
-  const [lastOrderId, setLastOrderId] = useState<string | null>(null);
-  const [favoriteIds, setFavoriteIds] = useState<string[]>([]);
-  const reducedMotion = useReducedMotionPreference();
-
-  useEffect(() => saveState(STORAGE_KEYS.products, products), [products]);
-  useEffect(() => saveState(STORAGE_KEYS.cart, cart), [cart]);
-  useEffect(() => saveState(STORAGE_KEYS.orders, orders), [orders]);
-  useEffect(() => saveState(STORAGE_KEYS.checkout, checkout), [checkout]);
-  useEffect(() => saveState(STORAGE_KEYS.settings, settings), [settings]);
+  const [catalogState, setCatalogState] = useState<CatalogState>('loading');
+  const [announcement, setAnnouncement] = useState('');
+  const reducedMotion = useReducedMotion();
 
   useEffect(() => {
-    setCheckout((current) => ({ ...current, paymentMethod: settings.defaultPaymentMethod }));
-  }, [settings.defaultPaymentMethod]);
+    const shouldFail = new URLSearchParams(window.location.search).get('catalog') === 'error';
+    const timer = window.setTimeout(() => setCatalogState(shouldFail ? 'error' : 'ready'), 520);
+    return () => window.clearTimeout(timer);
+  }, []);
+  useEffect(() => saveState(STORAGE.products, products), [products]);
+  useEffect(() => saveState(STORAGE.cart, cart), [cart]);
+  useEffect(() => saveState(STORAGE.favorites, favorites), [favorites]);
+  useEffect(() => saveState(STORAGE.orders, orders), [orders]);
+  useEffect(() => saveState(STORAGE.checkout, checkout), [checkout]);
+  useEffect(() => saveState(STORAGE.settings, settings), [settings]);
 
+  useGSAP(() => {
+    if (reducedMotion) return;
+    gsap.fromTo('.screen > *', { autoAlpha: 0, y: 12 }, { autoAlpha: 1, y: 0, duration: .35, stagger: .025, ease: 'power2.out' });
+  }, { dependencies: [view, reducedMotion], scope: shellRef, revertOnUpdate: true });
+
+  const lines = useMemo(() => cart.flatMap((item) => {
+    const product = products.find((candidate) => candidate.id === item.productId);
+    if (!product) return [];
+    const variant = getVariant(product, item.variantId);
+    return [{ ...item, product, variant, unitPrice: getUnitPrice(product, item.variantId) }];
+  }), [cart, products]);
+  const subtotal = lines.reduce((sum, line) => sum + line.unitPrice * line.quantity, 0);
+  const discount = subtotal >= 4000 ? Math.round(subtotal * .07) : 0;
+  const deliveryFee = getDeliveryFee(checkout.deliveryType, subtotal - discount);
+  const total = subtotal - discount + deliveryFee;
+  const cartCount = lines.reduce((sum, line) => sum + line.quantity, 0);
   const selectedProduct = products.find((product) => product.id === selectedProductId) ?? null;
 
   const filteredProducts = useMemo(() => {
     const query = search.trim().toLowerCase();
-    const result = products.filter((product) => {
-      const matchesCategory = category === 'all' || product.categoryId === category;
-      const matchesSearch =
-        !query ||
-        product.title.toLowerCase().includes(query) ||
-        product.short.toLowerCase().includes(query) ||
-        product.tags.some((tag) => tag.toLowerCase().includes(query));
+    return products.filter((product) => {
+      const categoryMatch = category === 'all' || product.categoryId === category;
+      const queryMatch = !query || `${product.title} ${product.short} ${product.origin} ${product.tags.join(' ')}`.toLowerCase().includes(query);
+      const favoritesMatch = view !== 'favorites' || favorites.includes(product.id);
+      return categoryMatch && queryMatch && favoritesMatch;
+    }).sort((a, b) => sort === 'priceAsc' ? a.price - b.price : sort === 'priceDesc' ? b.price - a.price : sort === 'stock' ? b.stock - a.stock : b.featured - a.featured);
+  }, [category, favorites, products, search, sort, view]);
 
-      return matchesCategory && matchesSearch;
+  function addToCart(productId: string, variantId: string, quantity = 1) {
+    const product = products.find((candidate) => candidate.id === productId);
+    if (!product || product.stock < 1) return;
+    const key = cartKey(productId, variantId);
+    setCart((current) => {
+      const item = current.find((candidate) => cartKey(candidate.productId, candidate.variantId) === key);
+      if (!item) return [...current, { productId, variantId, quantity: Math.min(quantity, product.stock) }];
+      return current.map((candidate) => cartKey(candidate.productId, candidate.variantId) === key
+        ? { ...candidate, quantity: Math.min(candidate.quantity + quantity, product.stock) } : candidate);
     });
-
-    return result.sort((a, b) => {
-      if (sort === 'priceAsc') return a.price - b.price;
-      if (sort === 'priceDesc') return b.price - a.price;
-      if (sort === 'stock') return b.stock - a.stock;
-      return b.popular - a.popular;
-    });
-  }, [category, products, search, sort]);
-
-  const cartLines = useMemo(
-    () =>
-      cart
-        .map((item) => {
-          const product = products.find((current) => current.id === item.productId);
-          return product ? { product, quantity: item.quantity } : null;
-        })
-        .filter((line): line is { product: Product; quantity: number } => Boolean(line)),
-    [cart, products],
-  );
-
-  const subtotal = cartLines.reduce((sum, line) => sum + line.product.price * line.quantity, 0);
-  const discount = promo.trim().toUpperCase() === 'TMA10' ? Math.round(subtotal * 0.1) : 0;
-  const deliveryFee = checkout.deliveryType === 'delivery' && subtotal - discount < 2500 ? 290 : 0;
-  const total = Math.max(0, subtotal - discount + deliveryFee);
-  const cartCount = cartLines.reduce((sum, line) => sum + line.quantity, 0);
-  const lastOrder = orders.find((order) => order.id === lastOrderId) ?? null;
-
-  useGSAP(
-    () => {
-      if (reducedMotion) return;
-      gsap.fromTo(
-        '.content .screen > *, .product-drawer',
-        { autoAlpha: 0, y: 18 },
-        { autoAlpha: 1, y: 0, duration: 0.42, ease: 'power3.out', stagger: 0.04 },
-      );
-      if (cartCount > 0) {
-        gsap.fromTo('.floating-cart', { scale: 0.96 }, { scale: 1, duration: 0.28, ease: 'back.out(1.8)' });
-      }
-    },
-    { dependencies: [view, selectedProductId, cartCount, reducedMotion], scope: shellRef, revertOnUpdate: true },
-  );
-
-  function addToCart(productId: string, quantity = 1) {
-    const product = products.find((current) => current.id === productId);
-    if (!product || product.stock <= 0) return;
-
-    setCart((currentCart) => {
-      const currentItem = currentCart.find((item) => item.productId === productId);
-      const currentQuantity = currentItem?.quantity ?? 0;
-      const nextQuantity = Math.min(product.stock, currentQuantity + quantity);
-
-      if (currentItem) {
-        return currentCart.map((item) =>
-          item.productId === productId ? { ...item, quantity: nextQuantity } : item,
-        );
-      }
-
-      return [...currentCart, { productId, quantity: nextQuantity }];
-    });
+    setAnnouncement(`${product.title}, ${getVariant(product, variantId).label} добавлен в корзину.`);
   }
 
-  function toggleFavorite(productId: string) {
-    setFavoriteIds((current) =>
-      current.includes(productId) ? current.filter((item) => item !== productId) : [...current, productId],
-    );
+  function updateCart(productId: string, variantId: string, quantity: number) {
+    const key = cartKey(productId, variantId);
+    const stock = products.find((product) => product.id === productId)?.stock ?? 0;
+    setCart((current) => quantity < 1 ? current.filter((item) => cartKey(item.productId, item.variantId) !== key)
+      : current.map((item) => cartKey(item.productId, item.variantId) === key ? { ...item, quantity: Math.min(quantity, stock) } : item));
   }
 
-  function updateCart(productId: string, quantity: number) {
-    const product = products.find((current) => current.id === productId);
-    if (!product || quantity <= 0) {
-      setCart((currentCart) => currentCart.filter((item) => item.productId !== productId));
-      return;
-    }
-
-    setCart((currentCart) =>
-      currentCart.map((item) =>
-        item.productId === productId ? { ...item, quantity: Math.min(quantity, product.stock) } : item,
-      ),
-    );
+  function updateOrderStatus(orderId: string, status: OrderStatus, source: 'customer' | 'merchant' = 'merchant') {
+    const createdAt = new Date().toISOString();
+    setOrders((current) => current.map((order) => order.id !== orderId ? order : {
+      ...order,
+      status,
+      paymentStatus: status === 'cancelled' ? 'cancelled' : order.paymentStatus,
+      activity: [...order.activity, {
+        id: `${orderId}-${Date.now()}`, createdAt, status, source,
+        title: statusMeta[status].title,
+        note: source === 'customer' ? 'Заказ отменён покупателем до начала сборки.' : 'Статус изменён на экране магазина.',
+      }],
+    }));
+    setAnnouncement(`Статус заказа ${orderId}: ${statusMeta[status].title}.`);
   }
-
-  function placeOrder() {
-    if (cartLines.length === 0) return;
-
-    const orderId = `TS-${Math.floor(2100 + Math.random() * 8000)}`;
-    const order: Order = {
-      id: orderId,
-      createdAt: new Date().toISOString(),
-      status: 'paid',
-      paymentMethod: checkout.paymentMethod,
-      paymentStatus: 'paid',
-      paymentProviderId: `paid-${checkout.paymentMethod}-${Date.now()}`,
-      deliveryType: checkout.deliveryType,
-      contactName: checkout.name,
-      phone: checkout.phone,
-      address:
-        checkout.deliveryType === 'pickup' ? 'Пункт выдачи: ТРЦ Планета, 1 этаж' : checkout.address,
-      comment: checkout.comment,
-      items: cartLines.map((line) => ({
-        productId: line.product.id,
-        title: line.product.title,
-        price: line.product.price,
-        quantity: line.quantity,
-      })),
-      subtotal,
-      discount,
-      deliveryFee,
-      total,
-    };
-
-    setProducts((currentProducts) =>
-      currentProducts.map((product) => {
-        const line = cartLines.find((item) => item.product.id === product.id);
-        return line ? { ...product, stock: Math.max(0, product.stock - line.quantity) } : product;
-      }),
-    );
-    setOrders((currentOrders) => [order, ...currentOrders]);
-    setCart([]);
-    setLastOrderId(orderId);
-    setView('success');
-  }
-
-  function updateOrderStatus(orderId: string, status: OrderStatus) {
-    setOrders((currentOrders) =>
-      currentOrders.map((order) => (order.id === orderId ? { ...order, status } : order)),
-    );
-  }
-
-  function updateStock(productId: string, stock: number) {
-    setProducts((currentProducts) =>
-      currentProducts.map((product) =>
-        product.id === productId ? { ...product, stock: Math.max(0, stock) } : product,
-      ),
-    );
-    setCart((currentCart) =>
-      currentCart
-        .map((item) => {
-          const product = products.find((current) => current.id === item.productId);
-          if (item.productId !== productId || !product) return item;
-          return { ...item, quantity: Math.min(item.quantity, Math.max(0, stock)) };
-        })
-        .filter((item) => item.quantity > 0),
-    );
-  }
-
-  const checkoutReady =
-    checkout.name.trim().length > 1 &&
-    checkout.phone.trim().length > 5 &&
-    (checkout.deliveryType === 'pickup' || checkout.address.trim().length > 5);
 
   return (
     <main className="app-root">
-      <section className="phone-shell" aria-label="Telegram Shop Lite" ref={shellRef}>
+      <a className="skip-link" href="#main-content">Перейти к содержимому</a>
+      <section className="phone-shell" aria-label="Демо-магазин Kamenka" ref={shellRef}>
         <header className="topbar">
-          <div>
-            <p className="tg-caption">Telegram Mini App · curated store</p>
-            <h1>{brand.name}</h1>
-          </div>
-          <button className="ghost-button" type="button" onClick={() => setView('admin')}>
-            Admin
-          </button>
+          <button className="wordmark" type="button" onClick={() => setView('shop')} aria-label="Kamenka — открыть каталог">КАМЕНКА</button>
+          <div className="topbar-meta"><span>Полевая лавка</span><strong>Новокузнецк</strong></div>
+          <button className="bag-button" type="button" onClick={() => setView('cart')}>Корзина <strong>{cartCount}</strong></button>
         </header>
-
         <nav className="tabbar" aria-label="Основная навигация">
-          <NavButton active={view === 'shop'} label="Каталог" onClick={() => setView('shop')} />
-          <NavButton active={view === 'cart'} label={`Корзина ${cartCount || ''}`} onClick={() => setView('cart')} />
-          <NavButton active={view === 'orders'} label="Заказы" onClick={() => setView('orders')} />
-          <NavButton active={view === 'settings'} label="Настройки" onClick={() => setView('settings')} />
+          <Nav active={view === 'shop'} label="Каталог" onClick={() => setView('shop')} />
+          <Nav active={view === 'favorites'} label={`Избранное ${favorites.length || ''}`} onClick={() => setView('favorites')} />
+          <Nav active={view === 'orders'} label="Статус заказа" onClick={() => setView('orders')} />
+          <Nav active={view === 'admin'} label="Магазин" onClick={() => setView('admin')} />
         </nav>
-
-        <div className="content">
-          {view === 'shop' && (
-            <CatalogView
-              cartCount={cartCount}
-              category={category}
-              favoriteIds={favoriteIds}
-              products={filteredProducts}
-              search={search}
-              sort={sort}
-              total={total}
-              onAdd={addToCart}
-              onCategoryChange={setCategory}
-              onOpenCart={() => setView('cart')}
-              onOpenProduct={setSelectedProductId}
-              onSearchChange={setSearch}
-              onSortChange={setSort}
-              onToggleFavorite={toggleFavorite}
-            />
-          )}
-
-          {view === 'cart' && (
-            <CartView
-              cartLines={cartLines}
-              deliveryFee={deliveryFee}
-              discount={discount}
-              promo={promo}
-              subtotal={subtotal}
-              total={total}
-              onCheckout={() => setView('checkout')}
-              onPromoChange={setPromo}
-              onUpdateCart={updateCart}
-            />
-          )}
-
-          {view === 'checkout' && (
-            <CheckoutView
-              checkout={checkout}
-              checkoutReady={checkoutReady}
-              deliveryFee={deliveryFee}
-              discount={discount}
-              subtotal={subtotal}
-              total={total}
-              settings={settings}
-              onBack={() => setView('cart')}
-              onChange={setCheckout}
-              onPlaceOrder={placeOrder}
-            />
-          )}
-
-          {view === 'success' && (
-            <SuccessView
-              order={lastOrder}
-              onCatalog={() => setView('shop')}
-              onOrders={() => setView('orders')}
-            />
-          )}
-
-          {view === 'orders' && <OrdersView orders={orders} />}
-
-          {view === 'admin' && (
-            <AdminView
-              orders={orders}
-              products={products}
-              onBack={() => setView('shop')}
-              onStatusChange={updateOrderStatus}
-              onStockChange={updateStock}
-            />
-          )}
-
-          {view === 'settings' && (
-            <SettingsView
-              settings={settings}
-              onChange={setSettings}
-            />
-          )}
+        <div className="content" id="main-content" tabIndex={-1}>
+          {(view === 'shop' || view === 'favorites') && <CatalogView
+            state={catalogState} products={filteredProducts} favorites={favorites} category={category} search={search} sort={sort}
+            isFavorites={view === 'favorites'} cartCount={cartCount} total={total}
+            onRetry={() => { setCatalogState('loading'); window.setTimeout(() => setCatalogState('ready'), 420); }}
+            onCategory={setCategory} onSearch={setSearch} onSort={setSort} onOpen={setSelectedProductId}
+            onFavorite={(id) => setFavorites((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id])}
+            onAdd={(product) => addToCart(product.id, product.variants[0].id)} onCart={() => setView('cart')} />}
+          {view === 'cart' && <CartView lines={lines} subtotal={subtotal} discount={discount} deliveryFee={deliveryFee} total={total}
+            deliveryType={checkout.deliveryType} onDelivery={(deliveryType) => setCheckout({ ...checkout, deliveryType })}
+            onUpdate={updateCart} onCatalog={() => setView('shop')} onCheckout={() => setView('checkout')} />}
+          {view === 'checkout' && <CheckoutView checkout={checkout} subtotal={subtotal} discount={discount} deliveryFee={deliveryFee} total={total}
+            lines={lines} orders={orders} onChange={setCheckout} onBack={() => setView('cart')}
+            onComplete={(order) => { setOrders([order, ...orders]); setCart([]); setView('orders'); setAnnouncement(`Заказ ${order.id} создан.`); }} />}
+          {view === 'orders' && <OrdersView orders={orders} onCancel={(id) => updateOrderStatus(id, 'cancelled', 'customer')} onCatalog={() => setView('shop')} />}
+          {view === 'admin' && <AdminView orders={orders} products={products} label={settings.merchantLabel}
+            onStatus={updateOrderStatus} onStock={(id, stock) => setProducts((current) => current.map((product) => product.id === id ? { ...product, stock: Math.max(0, stock) } : product))} />}
         </div>
-
-        {selectedProduct && (
-          <ProductDetail
-            product={selectedProduct}
-            cartQuantity={cart.find((item) => item.productId === selectedProduct.id)?.quantity ?? 0}
-            onAdd={addToCart}
-            onClose={() => setSelectedProductId(null)}
-          />
-        )}
+        {selectedProduct && <ProductDialog product={selectedProduct} onClose={() => setSelectedProductId(null)} onAdd={addToCart} />}
+        <p className="sr-only" aria-live="polite">{announcement}</p>
       </section>
     </main>
   );
 }
 
-interface NavButtonProps {
-  active: boolean;
-  label: string;
-  onClick: () => void;
+function Nav({ active, label, onClick }: { active: boolean; label: string; onClick: () => void }) {
+  return <button className={active ? 'tab active' : 'tab'} type="button" aria-current={active ? 'page' : undefined} onClick={onClick}>{label}</button>;
 }
 
-function NavButton({ active, label, onClick }: NavButtonProps) {
-  return (
-    <button className={active ? 'tab active' : 'tab'} type="button" onClick={onClick}>
-      {label}
-    </button>
-  );
-}
+type CatalogProps = {
+  state: CatalogState; products: Product[]; favorites: string[]; category: CategoryId; search: string; sort: SortMode;
+  isFavorites: boolean; cartCount: number; total: number; onRetry: () => void; onCategory: (id: CategoryId) => void;
+  onSearch: (value: string) => void; onSort: (value: SortMode) => void; onOpen: (id: string) => void;
+  onFavorite: (id: string) => void; onAdd: (product: Product) => void; onCart: () => void;
+};
 
-interface CatalogViewProps {
-  cartCount: number;
-  category: CategoryId;
-  favoriteIds: string[];
-  products: Product[];
-  search: string;
-  sort: SortMode;
-  total: number;
-  onAdd: (productId: string) => void;
-  onCategoryChange: (category: CategoryId) => void;
-  onOpenCart: () => void;
-  onOpenProduct: (productId: string) => void;
-  onSearchChange: (value: string) => void;
-  onSortChange: (value: SortMode) => void;
-  onToggleFavorite: (productId: string) => void;
-}
-
-function CatalogView({
-  cartCount,
-  category,
-  favoriteIds,
-  products,
-  search,
-  sort,
-  total,
-  onAdd,
-  onCategoryChange,
-  onOpenCart,
-  onOpenProduct,
-  onSearchChange,
-  onSortChange,
-  onToggleFavorite,
-}: CatalogViewProps) {
-  const featured = products.find((product) => product.id === 'kit-morning') ?? products[0];
-
-  return (
-    <div className="screen">
-      <section className="shop-hero">
-        <ImageFallback src="/assets/shop-hero.png" title="Shop Lite" className="hero-media" />
-        <div className="hero-copy">
-          <p>{brand.area}</p>
-          <strong>{brand.name}</strong>
-          <span>{brand.subtitle}</span>
-        </div>
-      </section>
-
-      <section className="store-strip" aria-label="Условия магазина">
-        <span>
-          <strong>{brand.rating}</strong>
-          рейтинг
-        </span>
-        <span>
-          <strong>45-90 мин</strong>
-          быстрая доставка
-        </span>
-        <span>
-          <strong>2 500 ₽</strong>
-          бесплатно от суммы
-        </span>
-      </section>
-
-      {featured && (
-        <section className="featured-product">
-          <div>
-            <p>Выбор магазина</p>
-            <h2>{featured.title}</h2>
-            <span>{featured.short}</span>
-            <button type="button" onClick={() => onOpenProduct(featured.id)}>
-              Смотреть набор
-            </button>
-          </div>
-          <ImageFallback src={featured.image} title={featured.title} className="featured-image" />
-        </section>
-      )}
-
-      <div className="search-row">
-        <label className="search-box">
-          <span>Поиск</span>
-          <input
-            value={search}
-            onChange={(event) => onSearchChange(event.target.value)}
-            placeholder="чай, сумка, набор"
-          />
-        </label>
-        <label className="sort-box">
-          <span>Сортировка</span>
-          <select value={sort} onChange={(event) => onSortChange(event.target.value as SortMode)}>
-            <option value="popular">Популярное</option>
-            <option value="priceAsc">Сначала дешевле</option>
-            <option value="priceDesc">Сначала дороже</option>
-            <option value="stock">По остаткам</option>
-          </select>
-        </label>
-      </div>
-
-      <div className="category-row" role="list" aria-label="Категории">
-        <button
-          className={category === 'all' ? 'chip active' : 'chip'}
-          type="button"
-          onClick={() => onCategoryChange('all')}
-        >
-          Все
-        </button>
-        {categories.map((item) => (
-          <button
-            className={category === item.id ? 'chip active' : 'chip'}
-            key={item.id}
-            type="button"
-            onClick={() => onCategoryChange(item.id)}
-          >
-            {item.title}
-          </button>
-        ))}
-      </div>
-
-      <section className="product-grid" aria-label="Каталог товаров">
-        {products.map((product) => (
-          <ProductCard
-            key={product.id}
-            product={product}
-            isFavorite={favoriteIds.includes(product.id)}
-            onAdd={() => onAdd(product.id)}
-            onOpen={() => onOpenProduct(product.id)}
-            onToggleFavorite={() => onToggleFavorite(product.id)}
-          />
-        ))}
-      </section>
-
-      {products.length === 0 && (
-        <EmptyState title="Ничего не найдено" text="Попробуй другой запрос или категорию." />
-      )}
-
-      {cartCount > 0 && (
-        <button className="floating-cart" type="button" onClick={onOpenCart}>
-          <span>{cartCount} товара</span>
-          <strong>{formatPrice(total)}</strong>
-        </button>
-      )}
+function CatalogView(props: CatalogProps) {
+  if (props.state === 'loading') return <div className="screen"><SectionTitle index="01" title="Каталог" subtitle="Собираем свежий каталог…" /><div className="catalog-loading" aria-live="polite">Загрузка товаров</div></div>;
+  if (props.state === 'error') return <div className="screen"><EmptyState title="Каталог не загрузился" text="Это тестируемое демо-состояние. Данные не потеряны." action="Повторить" onAction={props.onRetry} /></div>;
+  return <div className="screen catalog-screen">
+    <section className="editorial-intro">
+      <p>Field notes · выпуск 07/26</p>
+      <h1>{props.isFavorites ? 'Сохранённое для тихого утра.' : 'Кофе и вещи для медленных домашних ритуалов.'}</h1>
+      <span>{props.isFavorites ? 'Ваш личный список остаётся на этом устройстве.' : 'Обжариваем небольшими партиями. Доставляем по Новокузнецку или готовим к самовывозу.'}</span>
+    </section>
+    <section className="service-ledger" aria-label="Условия заказа">
+      <div><span>Доставка</span><strong>290 ₽</strong><small>бесплатно от {formatPrice(FREE_DELIVERY_MINIMUM)}</small></div>
+      <div><span>Минимум</span><strong>{formatPrice(ORDER_MINIMUM)}</strong><small>для курьера и самовывоза</small></div>
+      <div><span>Следующий слот</span><strong>18:00–21:00</strong><small>сегодня</small></div>
+    </section>
+    <div className="catalog-tools">
+      <label className="search-box"><span>Поиск по полевым заметкам</span><input value={props.search} onChange={(e) => props.onSearch(e.target.value)} placeholder="Эфиопия, фарфор, набор" /></label>
+      <label className="sort-box"><span>Порядок</span><select value={props.sort} onChange={(e) => props.onSort(e.target.value as SortMode)}><option value="featured">Выбор лавки</option><option value="priceAsc">Цена ↑</option><option value="priceDesc">Цена ↓</option><option value="stock">По наличию</option></select></label>
     </div>
-  );
+    <div className="category-row" aria-label="Категории"><button className={props.category === 'all' ? 'chip active' : 'chip'} onClick={() => props.onCategory('all')}>Все</button>{categories.map((item) => <button className={props.category === item.id ? 'chip active' : 'chip'} key={item.id} onClick={() => props.onCategory(item.id)}>{item.title}</button>)}</div>
+    <section className="product-grid" aria-label="Каталог товаров">{props.products.map((product, index) => <ProductCard key={product.id} product={product} index={index} favorite={props.favorites.includes(product.id)} onFavorite={() => props.onFavorite(product.id)} onOpen={() => props.onOpen(product.id)} onAdd={() => props.onAdd(product)} />)}</section>
+    {props.products.length === 0 && <EmptyState title={props.isFavorites ? 'Пока ничего не сохранено' : 'Ничего не найдено'} text={props.isFavorites ? 'Отмечайте товары в каталоге — они появятся здесь.' : 'Измените запрос или выберите другую категорию.'} action={props.isFavorites ? 'Открыть каталог' : undefined} onAction={props.isFavorites ? () => window.location.reload() : undefined} />}
+    {props.cartCount > 0 && <button className="floating-cart" onClick={props.onCart}><span>{props.cartCount} поз.</span><strong>Корзина · {formatPrice(props.total)}</strong></button>}
+  </div>;
 }
 
-interface ProductCardProps {
-  product: Product;
-  isFavorite: boolean;
-  onAdd: () => void;
-  onOpen: () => void;
-  onToggleFavorite: () => void;
+function ProductCard({ product, index, favorite, onFavorite, onOpen, onAdd }: { product: Product; index: number; favorite: boolean; onFavorite: () => void; onOpen: () => void; onAdd: () => void }) {
+  return <article className={`product-card product-card-${index % 4}`}>
+    <button className="product-image-button" onClick={onOpen}><ImageFallback src={product.image} title={product.title} className="product-image" /><span className="catalog-number">{String(index + 1).padStart(2, '0')}</span></button>
+    <button className={favorite ? 'favorite-button active' : 'favorite-button'} aria-pressed={favorite} aria-label={favorite ? 'Убрать из избранного' : 'Добавить в избранное'} onClick={onFavorite}>{favorite ? 'Сохранено' : 'Сохранить'}</button>
+    <button className="product-info" onClick={onOpen}><span className="product-meta">{product.origin}</span><h2>{product.title}</h2><p>{product.short}</p></button>
+    <div className="product-footer"><div><strong>от {formatPrice(product.price)}</strong><span>{product.stock} в наличии</span></div><button className="icon-button" disabled={!product.stock} onClick={onAdd}>{product.stock ? 'В корзину' : 'Нет в наличии'}</button></div>
+  </article>;
 }
 
-function ProductCard({ product, isFavorite, onAdd, onOpen, onToggleFavorite }: ProductCardProps) {
-  const soldOut = product.stock === 0;
-  const badge = product.stock <= 4 ? 'low stock' : product.oldPrice ? 'sale' : product.popular > 90 ? 'bestseller' : 'curated';
-
-  return (
-    <article className={soldOut ? 'product-card sold-out' : 'product-card'}>
-      <button className="product-image-button" type="button" onClick={onOpen}>
-        <ImageFallback src={product.image} title={product.title} className="product-image" />
-        <span className={`product-badge ${badge.replace(' ', '-')}`}>{badge}</span>
-      </button>
-      <button
-        className={isFavorite ? 'favorite-button active' : 'favorite-button'}
-        type="button"
-        aria-label={isFavorite ? 'Убрать из избранного' : 'Добавить в избранное'}
-        onClick={onToggleFavorite}
-      >
-        {isFavorite ? 'saved' : 'save'}
-      </button>
-      <button className="product-info" type="button" onClick={onOpen}>
-        <span className="product-meta">
-          {product.weight} · ★ {product.rating}
-        </span>
-        <h2>{product.title}</h2>
-        <p>{product.short}</p>
-      </button>
-      <div className="product-footer">
-        <div>
-          <strong>{formatPrice(product.price)}</strong>
-          {product.oldPrice && <span>{formatPrice(product.oldPrice)}</span>}
-        </div>
-        <button className="icon-button" type="button" disabled={soldOut} onClick={onAdd}>
-          {soldOut ? 'Нет' : '+'}
-        </button>
-      </div>
-    </article>
-  );
-}
-
-interface ProductDetailProps {
-  product: Product;
-  cartQuantity: number;
-  onAdd: (productId: string) => void;
-  onClose: () => void;
-}
-
-function ProductDetail({ product, cartQuantity, onAdd, onClose }: ProductDetailProps) {
-  const canAdd = cartQuantity < product.stock;
-
-  return (
-    <div className="drawer-backdrop" role="presentation" onClick={onClose}>
-      <aside className="product-drawer" aria-label="Детали товара" onClick={(event) => event.stopPropagation()}>
-        <div className="drawer-handle" />
-        <ImageFallback src={product.image} title={product.title} className="detail-image" />
-        <div className="detail-header">
-          <div>
-            <p>{categories.find((item) => item.id === product.categoryId)?.title}</p>
-            <h2>{product.title}</h2>
-          </div>
-          <strong>{formatPrice(product.price)}</strong>
-        </div>
-        <p className="detail-description">{product.description}</p>
-        <div className="variant-panel">
-          <span>Вариант</span>
-          <div>
-            <button type="button" className="selected">
-              {product.weight}
-            </button>
-            <button type="button">Подарочная упаковка</button>
-          </div>
-        </div>
-        <div className="tag-row">
-          {product.tags.map((tag) => (
-            <span key={tag}>{tag}</span>
-          ))}
-        </div>
-        <div className="stock-note">
-          <span>Остаток</span>
-          <strong>{product.stock} шт.</strong>
-        </div>
-        <div className="pair-note">
-          <strong>Часто берут вместе</strong>
-          <span>Чай + блокнот или свеча дают готовый подарок без лишней упаковки.</span>
-        </div>
-        <button className="primary-button" type="button" disabled={!canAdd} onClick={() => onAdd(product.id)}>
-          {canAdd ? 'Добавить в корзину' : 'Максимум в корзине'}
-        </button>
-      </aside>
-    </div>
-  );
-}
-
-interface CartViewProps {
-  cartLines: Array<{ product: Product; quantity: number }>;
-  deliveryFee: number;
-  discount: number;
-  promo: string;
-  subtotal: number;
-  total: number;
-  onCheckout: () => void;
-  onPromoChange: (value: string) => void;
-  onUpdateCart: (productId: string, quantity: number) => void;
-}
-
-function CartView({
-  cartLines,
-  deliveryFee,
-  discount,
-  promo,
-  subtotal,
-  total,
-  onCheckout,
-  onPromoChange,
-  onUpdateCart,
-}: CartViewProps) {
-  if (cartLines.length === 0) {
-    return (
-      <div className="screen">
-        <EmptyState title="Корзина пустая" text="Добавь товары из каталога. Остатки будут проверены автоматически." />
-      </div>
-    );
-  }
-
-  return (
-    <div className="screen">
-      <SectionTitle title="Корзина" subtitle="Количество нельзя сделать больше доступного остатка." />
-      <div className="cart-list">
-        {cartLines.map(({ product, quantity }) => (
-          <article className="cart-item" key={product.id}>
-            <ImageFallback src={product.image} title={product.title} className="cart-image" />
-            <div>
-              <h2>{product.title}</h2>
-              <p>{formatPrice(product.price)} · остаток {product.stock}</p>
-              <div className="stepper">
-                <button type="button" onClick={() => onUpdateCart(product.id, quantity - 1)}>
-                  -
-                </button>
-                <strong>{quantity}</strong>
-                <button
-                  type="button"
-                  disabled={quantity >= product.stock}
-                  onClick={() => onUpdateCart(product.id, quantity + 1)}
-                >
-                  +
-                </button>
-                <button className="remove-button" type="button" onClick={() => onUpdateCart(product.id, 0)}>
-                  Удалить
-                </button>
-              </div>
-            </div>
-          </article>
-        ))}
-      </div>
-
-      <label className="promo-box">
-        <span>Промокод</span>
-        <input value={promo} onChange={(event) => onPromoChange(event.target.value)} placeholder="TMA10" />
-      </label>
-
-      <OrderSummary subtotal={subtotal} discount={discount} deliveryFee={deliveryFee} total={total} />
-
-      <button className="primary-button sticky-action" type="button" onClick={onCheckout}>
-        Оформить заказ
-      </button>
-    </div>
-  );
-}
-
-interface CheckoutViewProps {
-  checkout: CheckoutForm;
-  checkoutReady: boolean;
-  deliveryFee: number;
-  discount: number;
-  subtotal: number;
-  total: number;
-  settings: AppSettings;
-  onBack: () => void;
-  onChange: (value: CheckoutForm) => void;
-  onPlaceOrder: () => void;
-}
-
-function CheckoutView({
-  checkout,
-  checkoutReady,
-  deliveryFee,
-  discount,
-  subtotal,
-  total,
-  settings,
-  onBack,
-  onChange,
-  onPlaceOrder,
-}: CheckoutViewProps) {
-  const [paymentStatus, setPaymentStatus] = useState<PaymentStatus>('draft');
-  const [paymentSession, setPaymentSession] = useState<PaymentSession | null>(null);
-  const [isCreatingPayment, setIsCreatingPayment] = useState(false);
-
-  function updateField<K extends keyof CheckoutForm>(key: K, value: CheckoutForm[K]) {
-    onChange({ ...checkout, [key]: value });
-  }
-
+function ProductDialog({ product, onClose, onAdd }: { product: Product; onClose: () => void; onAdd: (id: string, variantId: string) => void }) {
+  const dialogRef = useRef<HTMLDivElement>(null); const closeRef = useRef<HTMLButtonElement>(null);
+  const returnFocusRef = useRef<HTMLElement | null>(null); const [variantId, setVariantId] = useState(product.variants[0].id);
   useEffect(() => {
-    setPaymentStatus('draft');
-    setPaymentSession(null);
-  }, [checkout.paymentMethod, settings.paymentMode, total]);
-
-  async function handlePaymentAction() {
-    if (!checkoutReady || total <= 0) return;
-
-    if (paymentStatus === 'invoice') {
-      setPaymentStatus('paid');
-      return;
-    }
-
-    setIsCreatingPayment(true);
-    const session = await createPaymentSession(checkout.paymentMethod, total, settings.paymentMode);
-    setPaymentSession(session);
-    setPaymentStatus('invoice');
-    setIsCreatingPayment(false);
-  }
-
-  return (
-    <div className="screen">
-      <button className="link-button" type="button" onClick={onBack}>
-        Назад в корзину
-      </button>
-      <SectionTitle title="Checkout" subtitle="Минимум шагов: контакт, способ получения и комментарий." />
-
-      <div className="checkout-steps" aria-label="Шаги оформления">
-        <span className="done">Доставка</span>
-        <span className={checkoutReady ? 'done' : ''}>Контакты</span>
-        <span className={paymentStatus === 'paid' ? 'done' : ''}>Оплата</span>
-      </div>
-
-      <div className="delivery-toggle" role="group" aria-label="Способ получения">
-        <DeliveryButton
-          active={checkout.deliveryType === 'delivery'}
-          label="Доставка"
-          onClick={() => updateField('deliveryType', 'delivery')}
-        />
-        <DeliveryButton
-          active={checkout.deliveryType === 'pickup'}
-          label="Самовывоз"
-          onClick={() => updateField('deliveryType', 'pickup')}
-        />
-      </div>
-
-      <div className="form-grid">
-        <TextField label="Имя" value={checkout.name} onChange={(value) => updateField('name', value)} />
-        <TextField label="Телефон" value={checkout.phone} onChange={(value) => updateField('phone', value)} />
-        {checkout.deliveryType === 'delivery' && (
-          <TextField label="Адрес" value={checkout.address} onChange={(value) => updateField('address', value)} />
-        )}
-        <label className="field">
-          <span>Комментарий</span>
-          <textarea
-            value={checkout.comment}
-            onChange={(event) => updateField('comment', event.target.value)}
-            placeholder="Домофон, удобное время, замена товара"
-          />
-        </label>
-      </div>
-
-      <OrderSummary subtotal={subtotal} discount={discount} deliveryFee={deliveryFee} total={total} />
-
-      <PaymentPanel
-        method={checkout.paymentMethod}
-        mode={settings.paymentMode}
-        session={paymentSession}
-        status={paymentStatus}
-        total={total}
-        disabled={!checkoutReady}
-        isLoading={isCreatingPayment}
-        onAction={handlePaymentAction}
-        onMethodChange={(method) => updateField('paymentMethod', method)}
-      />
-
-      <button
-        className="primary-button sticky-action"
-        type="button"
-        disabled={!checkoutReady || paymentStatus !== 'paid'}
-        onClick={onPlaceOrder}
-      >
-        Создать заказ · {formatPrice(total)}
-      </button>
+    returnFocusRef.current = document.activeElement as HTMLElement; closeRef.current?.focus();
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose();
+      if (event.key === 'Tab' && dialogRef.current) {
+        const controls = [...dialogRef.current.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled)')];
+        if (!controls.length) return; const first = controls[0]; const last = controls[controls.length - 1];
+        if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+        if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+      }
+    };
+    document.addEventListener('keydown', handleKey); return () => { document.removeEventListener('keydown', handleKey); returnFocusRef.current?.focus(); };
+  }, [onClose]);
+  const variant = getVariant(product, variantId);
+  return <div className="drawer-backdrop" onMouseDown={(e) => { if (e.currentTarget === e.target) onClose(); }}>
+    <div className="product-drawer" ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="product-dialog-title">
+      <button className="dialog-close" ref={closeRef} onClick={onClose} aria-label="Закрыть">Закрыть</button>
+      <ImageFallback src={product.image} title="" className="detail-image" />
+      <div className="detail-header"><div><p>{product.origin}</p><h2 id="product-dialog-title">{product.title}</h2></div><strong>{formatPrice(product.price + variant.priceDelta)}</strong></div>
+      <p className="detail-description">{product.description}</p>
+      <fieldset className="variant-panel"><legend>Выберите вариант</legend>{product.variants.map((item) => <label className={item.id === variantId ? 'variant-option selected' : 'variant-option'} key={item.id}><input type="radio" name="variant" value={item.id} checked={item.id === variantId} onChange={() => setVariantId(item.id)} /><span><strong>{item.label}</strong><small>{item.note}</small></span><b>{item.priceDelta ? `+ ${formatPrice(item.priceDelta)}` : formatPrice(product.price)}</b></label>)}</fieldset>
+      <button className="primary-button" disabled={!product.stock} onClick={() => { onAdd(product.id, variantId); onClose(); }}>Добавить · {formatPrice(product.price + variant.priceDelta)}</button>
     </div>
-  );
+  </div>;
 }
 
-interface PaymentPanelProps {
-  method: PaymentMethod;
-  mode: PaymentMode;
-  session: PaymentSession | null;
-  status: PaymentStatus;
-  total: number;
-  disabled: boolean;
-  isLoading: boolean;
-  onAction: () => void;
-  onMethodChange: (method: PaymentMethod) => void;
+type CartLine = CartItem & { product: Product; variant: Product['variants'][number]; unitPrice: number };
+function CartView({ lines, subtotal, discount, deliveryFee, total, deliveryType, onDelivery, onUpdate, onCatalog, onCheckout }: { lines: CartLine[]; subtotal: number; discount: number; deliveryFee: number; total: number; deliveryType: CheckoutForm['deliveryType']; onDelivery: (value: CheckoutForm['deliveryType']) => void; onUpdate: (id: string, variant: string, quantity: number) => void; onCatalog: () => void; onCheckout: () => void }) {
+  if (!lines.length) return <div className="screen"><SectionTitle index="02" title="Корзина" subtitle="Здесь появятся выбранные варианты." /><EmptyState title="Корзина пустая" text="Вернитесь в каталог и соберите заказ." action="Открыть каталог" onAction={onCatalog} /></div>;
+  const minimumLeft = Math.max(0, ORDER_MINIMUM - subtotal); const freeLeft = Math.max(0, FREE_DELIVERY_MINIMUM - (subtotal - discount));
+  return <div className="screen"><SectionTitle index="02" title="Корзина" subtitle="Проверяем вариант, количество и стоимость до оформления." />
+    <div className="cart-list">{lines.map((line) => <article className="cart-item" key={cartKey(line.productId, line.variantId)}><ImageFallback src={line.product.image} title="" className="cart-image" /><div><h2>{line.product.title}</h2><p>{line.variant.label} · {formatPrice(line.unitPrice)}</p><div className="stepper"><button onClick={() => onUpdate(line.productId, line.variantId, line.quantity - 1)} aria-label="Уменьшить">−</button><strong>{line.quantity}</strong><button disabled={line.quantity >= line.product.stock} onClick={() => onUpdate(line.productId, line.variantId, line.quantity + 1)} aria-label="Увеличить">+</button><button className="remove-button" onClick={() => onUpdate(line.productId, line.variantId, 0)}>Удалить</button></div></div></article>)}</div>
+    <section className="fulfilment-panel"><h2>Получение</h2><div className="delivery-toggle"><button className={deliveryType === 'delivery' ? 'active' : ''} onClick={() => onDelivery('delivery')}>Курьер · от 290 ₽</button><button className={deliveryType === 'pickup' ? 'active' : ''} onClick={() => onDelivery('pickup')}>Самовывоз · 0 ₽</button></div><p>{deliveryType === 'delivery' ? freeLeft ? `До бесплатной доставки ещё ${formatPrice(freeLeft)}.` : 'Бесплатная доставка применена.' : 'Каменка, пр. Металлургов, 18. Ежедневно 10:00–20:00.'}</p></section>
+    <OrderSummary subtotal={subtotal} discount={discount} deliveryFee={deliveryFee} total={total} />
+    {minimumLeft > 0 && <p className="minimum-note" role="status">Добавьте ещё на {formatPrice(minimumLeft)} до минимальной суммы заказа.</p>}
+    <button className="primary-button sticky-action" disabled={minimumLeft > 0} onClick={onCheckout}>Оформить заказ · {formatPrice(total)}</button>
+  </div>;
 }
 
-function PaymentPanel({
-  method,
-  mode,
-  session,
-  status,
-  total,
-  disabled,
-  isLoading,
-  onAction,
-  onMethodChange,
-}: PaymentPanelProps) {
-  const selectedMethod = getPaymentMethod(method);
-  const actionLabel =
-    status === 'paid'
-      ? 'Оплата подтверждена'
-      : status === 'invoice'
-        ? 'Подтвердить оплату в демо'
-        : 'Сформировать счет';
-
-  return (
-    <section className="payment-note" aria-label="Оплата заказа">
-      <div className="payment-head">
-        <strong>Оплата</strong>
-        <span>{formatPrice(total)}</span>
-      </div>
-      <div className="payment-methods" role="radiogroup" aria-label="Способ оплаты">
-        {paymentMethods.map((item) => (
-          <button
-            className={item.id === method ? 'payment-method active' : 'payment-method'}
-            type="button"
-            role="radio"
-            aria-checked={item.id === method}
-            disabled={status === 'paid'}
-            key={item.id}
-            onClick={() => onMethodChange(item.id)}
-          >
-            <strong>{item.title}</strong>
-            <span>{item.short}</span>
-          </button>
-        ))}
-      </div>
-      <div className={`payment-state ${status}`}>
-        <strong>{selectedMethod.title} · {mode}</strong>
-        <span>{selectedMethod.description}</span>
-        {session && <code>{session.endpoint} · {session.id}</code>}
-      </div>
-      <button className="secondary-button payment-action" type="button" disabled={disabled || status === 'paid'} onClick={onAction}>
-        {isLoading ? 'Создаем счет' : actionLabel}
-      </button>
-    </section>
-  );
-}
-
-interface DeliveryButtonProps {
-  active: boolean;
-  label: string;
-  onClick: () => void;
-}
-
-function DeliveryButton({ active, label, onClick }: DeliveryButtonProps) {
-  return (
-    <button className={active ? 'delivery-button active' : 'delivery-button'} type="button" onClick={onClick}>
-      {label}
-    </button>
-  );
-}
-
-interface SuccessViewProps {
-  order: Order | null;
-  onCatalog: () => void;
-  onOrders: () => void;
-}
-
-function SuccessView({ order, onCatalog, onOrders }: SuccessViewProps) {
-  return (
-    <div className="screen success-screen">
-      <div className="success-mark">✓</div>
-      <h2>Заказ оплачен</h2>
-      <p>
-        {order ? `${order.id} · ${formatPrice(order.total)}` : 'Новый заказ появится в истории.'}
-      </p>
-      <div className="telegram-status">
-        <strong>{order ? getPaymentMethod(order.paymentMethod).title : 'Платеж подтвержден'}</strong>
-        <span>Бот отправит номер заказа, чек и следующие обновления.</span>
-      </div>
-      {order && <OrderTracking status={order.status} />}
-      <button className="primary-button" type="button" onClick={onOrders}>
-        Открыть историю
-      </button>
-      <button className="secondary-button" type="button" onClick={onCatalog}>
-        Вернуться в каталог
-      </button>
-    </div>
-  );
-}
-
-function OrdersView({ orders }: { orders: Order[] }) {
-  return (
-    <div className="screen">
-      <SectionTitle title="Мои заказы" subtitle="Такой статус можно отправлять пользователю через Telegram-бота." />
-      <div className="orders-list">
-        {orders.map((order) => (
-          <article className="order-card" key={order.id}>
-            <div className="order-head">
-              <div>
-                <h2>{order.id}</h2>
-                <p>{formatDate(order.createdAt)}</p>
-              </div>
-              <StatusPill status={order.status} />
-            </div>
-            <div className="order-items">
-              {order.items.map((item) => (
-                <span key={`${order.id}-${item.productId}`}>
-                  {item.title} × {item.quantity}
-                </span>
-              ))}
-            </div>
-            <div className="order-footer">
-              <strong>{formatPrice(order.total)}</strong>
-              <span>{statusMeta[order.status].botText}</span>
-            </div>
-            <div className="payment-line">
-              <span>{getPaymentMethod(order.paymentMethod).title}</span>
-              <strong>{order.paymentStatus}</strong>
-            </div>
-            <OrderTracking status={order.status} />
-          </article>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-interface AdminViewProps {
-  orders: Order[];
-  products: Product[];
-  onBack: () => void;
-  onStatusChange: (orderId: string, status: OrderStatus) => void;
-  onStockChange: (productId: string, stock: number) => void;
-}
-
-function AdminView({ orders, products, onBack, onStatusChange, onStockChange }: AdminViewProps) {
-  return (
-    <div className="screen">
-      <button className="link-button" type="button" onClick={onBack}>
-        Назад в магазин
-      </button>
-      <SectionTitle title="Админ-экран" subtitle="Статусы заказов и остатки меняются локально, как в демо API." />
-
-      <section className="admin-section">
-        <h2>Заказы</h2>
-        <div className="admin-list">
-          {orders.map((order) => (
-            <article className="admin-order" key={order.id}>
-              <div>
-                <strong>{order.id}</strong>
-                <span>{formatPrice(order.total)} · {order.items.length} поз.</span>
-              </div>
-              <select value={order.status} onChange={(event) => onStatusChange(order.id, event.target.value as OrderStatus)}>
-                {statusFlow.map((status) => (
-                  <option key={status} value={status}>
-                    {statusMeta[status].title}
-                  </option>
-                ))}
-              </select>
-            </article>
-          ))}
-        </div>
-      </section>
-
-      <section className="admin-section">
-        <h2>Остатки</h2>
-        <div className="stock-list">
-          {products.map((product) => (
-            <label className="stock-row" key={product.id}>
-              <span>{product.title}</span>
-              <input
-                min="0"
-                type="number"
-                value={product.stock}
-                onChange={(event) => onStockChange(product.id, Number(event.target.value))}
-              />
-            </label>
-          ))}
-        </div>
-      </section>
-    </div>
-  );
-}
-
-function SettingsView({
-  settings,
-  onChange,
-}: {
-  settings: AppSettings;
-  onChange: (settings: AppSettings) => void;
-}) {
-  const update = <K extends keyof AppSettings>(key: K, value: AppSettings[K]) => {
-    onChange({ ...settings, [key]: value });
+function CheckoutView({ checkout, subtotal, discount, deliveryFee, total, lines, orders, onChange, onBack, onComplete }: { checkout: CheckoutForm; subtotal: number; discount: number; deliveryFee: number; total: number; lines: CartLine[]; orders: Order[]; onChange: (form: CheckoutForm) => void; onBack: () => void; onComplete: (order: Order) => void }) {
+  const [errors, setErrors] = useState<CheckoutErrors>({}); const [paid, setPaid] = useState(false); const [paying, setPaying] = useState(false);
+  const update = <K extends keyof CheckoutForm>(key: K, value: CheckoutForm[K]) => { onChange({ ...checkout, [key]: value }); setErrors((current) => ({ ...current, [key]: undefined })); setPaid(false); };
+  const submit = () => {
+    const nextErrors = validateCheckout(checkout); setErrors(nextErrors); if (Object.keys(nextErrors).length || !paid || !lines.length) return;
+    const now = new Date().toISOString(); const id = `KM-${String(2050 + orders.length).padStart(4, '0')}`;
+    const deliveryWindow = checkout.deliveryType === 'pickup' ? 'Самовывоз · ежедневно 10:00–20:00' : deliveryWindows.find((item) => item.id === checkout.deliveryWindowId)?.label ?? '';
+    onComplete({ id, createdAt: now, status: 'paid', paymentMethod: checkout.paymentMethod, paymentStatus: 'demo-paid', deliveryType: checkout.deliveryType, deliveryWindow,
+      contactName: checkout.name.trim(), phone: checkout.phone.trim(), address: checkout.deliveryType === 'pickup' ? 'Каменка, пр. Металлургов, 18' : checkout.address.trim(), comment: checkout.comment.trim(),
+      items: lines.map((line) => ({ productId: line.productId, title: line.product.title, variantId: line.variantId, variantLabel: line.variant.label, unitPrice: line.unitPrice, quantity: line.quantity })),
+      activity: [{ id: `${id}-created`, createdAt: now, status: 'paid', title: 'Заказ создан', note: 'Демо-оплата подтверждена локально. Реального списания не было.', source: 'demo' }],
+      subtotal, discount, deliveryFee, total });
   };
-
-  return (
-    <div className="screen settings-screen">
-      <SectionTitle title="Настройки" subtitle="Платежи, чеки и Telegram-уведомления для production-сценария." />
-
-      <section className="settings-section">
-        <h2>Платежи</h2>
-        <div className="settings-segmented" role="group" aria-label="Режим платежей">
-          <button
-            className={settings.paymentMode === 'test' ? 'active' : ''}
-            type="button"
-            onClick={() => update('paymentMode', 'test')}
-          >
-            Test
-          </button>
-          <button
-            className={settings.paymentMode === 'production' ? 'active' : ''}
-            type="button"
-            onClick={() => update('paymentMode', 'production')}
-          >
-            Production
-          </button>
-        </div>
-        <label className="field">
-          <span>Метод по умолчанию</span>
-          <select
-            value={settings.defaultPaymentMethod}
-            onChange={(event) => update('defaultPaymentMethod', event.target.value as PaymentMethod)}
-          >
-            {paymentMethods.map((item) => (
-              <option key={item.id} value={item.id}>
-                {item.title}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="field">
-          <span>Merchant label</span>
-          <input
-            value={settings.merchantLabel}
-            maxLength={80}
-            onChange={(event) => update('merchantLabel', event.target.value)}
-          />
-        </label>
-      </section>
-
-      <section className="settings-section">
-        <h2>Операции</h2>
-        <label className="settings-toggle">
-          <input
-            type="checkbox"
-            checked={settings.fiscalReceipts}
-            onChange={(event) => update('fiscalReceipts', event.target.checked)}
-          />
-          <span>Формировать чек через ЮKassa после paid webhook</span>
-        </label>
-        <label className="settings-toggle">
-          <input
-            type="checkbox"
-            checked={settings.telegramUpdates}
-            onChange={(event) => update('telegramUpdates', event.target.checked)}
-          />
-          <span>Отправлять статус заказа пользователю в Telegram</span>
-        </label>
-      </section>
-
-      <section className="settings-section">
-        <h2>Backend endpoints</h2>
-        <div className="endpoint-list">
-          {paymentMethods.map((item) => (
-            <code key={item.id}>{item.endpoint}</code>
-          ))}
-          <code>/api/payments/webhook/yookassa</code>
-          <code>/api/telegram/pre-checkout</code>
-        </div>
-        <p>
-          Secret key ЮKassa и bot token хранятся только на сервере. Мини-апп получает invoice link или confirmation_url.
-        </p>
-      </section>
-    </div>
-  );
+  return <div className="screen checkout-screen"><button className="link-button" onClick={onBack}>← Назад в корзину</button><SectionTitle index="03" title="Оформление" subtitle="Один экран, прозрачный итог и ошибки рядом с полями." />
+    <div className="checkout-steps"><span className="done">1 · Получение</span><span>2 · Контакты</span><span className={paid ? 'done' : ''}>3 · Демо-оплата</span></div>
+    <div className="delivery-toggle"><button className={checkout.deliveryType === 'delivery' ? 'active' : ''} onClick={() => update('deliveryType', 'delivery')}>Доставка</button><button className={checkout.deliveryType === 'pickup' ? 'active' : ''} onClick={() => update('deliveryType', 'pickup')}>Самовывоз</button></div>
+    {checkout.deliveryType === 'delivery' && <fieldset className="window-list"><legend>Интервал доставки</legend>{deliveryWindows.map((window) => <label key={window.id} className={checkout.deliveryWindowId === window.id ? 'selected' : ''}><input type="radio" name="window" checked={checkout.deliveryWindowId === window.id} onChange={() => update('deliveryWindowId', window.id)} /><span><strong>{window.label}</strong><small>{window.note}</small></span></label>)}{errors.deliveryWindowId && <p className="field-error">{errors.deliveryWindowId}</p>}</fieldset>}
+    <div className="form-grid"><TextField id="name" label="Имя" value={checkout.name} error={errors.name} autoComplete="name" onChange={(value) => update('name', value)} /><TextField id="phone" label="Телефон" value={checkout.phone} error={errors.phone} autoComplete="tel" onChange={(value) => update('phone', value)} />{checkout.deliveryType === 'delivery' && <TextField id="address" label="Адрес" value={checkout.address} error={errors.address} autoComplete="street-address" onChange={(value) => update('address', value)} />}<label className="field"><span>Комментарий · необязательно</span><textarea value={checkout.comment} onChange={(e) => update('comment', e.target.value)} placeholder="Домофон, ориентир или пожелание" /></label></div>
+    <OrderSummary subtotal={subtotal} discount={discount} deliveryFee={deliveryFee} total={total} />
+    <section className="payment-note"><div><strong>Демо-оплата</strong><span>Реальный платёжный провайдер не подключён. Деньги и данные карты не обрабатываются.</span></div><div className="payment-methods">{paymentMethods.map((method) => <button role="radio" aria-checked={checkout.paymentMethod === method.id} className={checkout.paymentMethod === method.id ? 'active' : ''} key={method.id} onClick={() => update('paymentMethod', method.id)}><strong>{method.title}</strong><span>{method.note}</span></button>)}</div><button className="secondary-button" disabled={paying || paid} onClick={() => { const next = validateCheckout(checkout); setErrors(next); if (Object.keys(next).length) return; setPaying(true); window.setTimeout(() => { setPaid(true); setPaying(false); }, 480); }}>{paying ? 'Подтверждаем…' : paid ? 'Демо-оплата подтверждена' : `Подтвердить демо-оплату · ${formatPrice(total)}`}</button></section>
+    <button className="primary-button sticky-action" disabled={!paid} onClick={submit}>Создать заказ</button>
+  </div>;
 }
 
-interface TextFieldProps {
-  label: string;
-  value: string;
-  onChange: (value: string) => void;
+function OrdersView({ orders, onCancel, onCatalog }: { orders: Order[]; onCancel: (id: string) => void; onCatalog: () => void }) {
+  return <div className="screen"><SectionTitle index="04" title="Статус заказа" subtitle="Источник и время каждого изменения видны в журнале." />{!orders.length && <EmptyState title="Заказов ещё нет" text="После демо-оплаты заказ появится здесь." action="Открыть каталог" onAction={onCatalog} />}<div className="orders-list">{orders.map((order) => { const canCancel = order.status === 'new' || order.status === 'paid'; return <article className="order-card" key={order.id}><div className="order-head"><div><h2>{order.id}</h2><p>{formatDate(order.createdAt)} · {order.deliveryWindow}</p></div><StatusPill status={order.status} /></div><div className="order-items">{order.items.map((item) => <span key={`${item.productId}-${item.variantId}`}>{item.title} · {item.variantLabel} × {item.quantity}</span>)}</div><div className="order-footer"><strong>{formatPrice(order.total)}</strong><span>{order.address}</span></div><OrderTracking order={order} />{canCancel && <button className="danger-button" onClick={() => onCancel(order.id)}>Отменить заказ</button>}{!canCancel && order.status !== 'cancelled' && <p className="order-policy">Отмена доступна до начала сборки. Сейчас свяжитесь с магазином.</p>}</article>; })}</div></div>;
 }
 
-function TextField({ label, value, onChange }: TextFieldProps) {
-  return (
-    <label className="field">
-      <span>{label}</span>
-      <input value={value} onChange={(event) => onChange(event.target.value)} />
-    </label>
-  );
+function AdminView({ orders, products, label, onStatus, onStock }: { orders: Order[]; products: Product[]; label: string; onStatus: (id: string, status: OrderStatus) => void; onStock: (id: string, stock: number) => void }) {
+  const openOrders = orders.filter((order) => !['done', 'cancelled'].includes(order.status));
+  return <div className="screen admin-screen"><SectionTitle index="M" title="Заказы магазина" subtitle={`${label}. Локальная демонстрация операций без backend.`} /><section className="operations-strip"><div><span>Активные</span><strong>{openOrders.length}</strong></div><div><span>К сборке</span><strong>{orders.filter((order) => order.status === 'paid').length}</strong></div><div><span>Низкий остаток</span><strong>{products.filter((product) => product.stock < 8).length}</strong></div></section><section className="admin-section"><h2>Очередь</h2>{orders.map((order) => <article className="admin-order" key={order.id}><div><strong>{order.id}</strong><span>{order.contactName} · {formatPrice(order.total)}</span><small>{order.items.map((item) => `${item.title} / ${item.variantLabel}`).join(', ')}</small></div><select aria-label={`Статус заказа ${order.id}`} value={order.status} disabled={order.status === 'cancelled'} onChange={(e) => onStatus(order.id, e.target.value as OrderStatus)}>{statusFlow.map((status) => <option key={status} value={status}>{statusMeta[status].title}</option>)}{order.status === 'cancelled' && <option value="cancelled">Отменён</option>}</select></article>)}</section><section className="admin-section"><h2>Остатки</h2><div className="stock-list">{products.map((product) => <label className="stock-row" key={product.id}><span>{product.title}<small>{product.origin}</small></span><input type="number" min="0" value={product.stock} onChange={(e) => onStock(product.id, Number(e.target.value))} /></label>)}</div></section></div>;
 }
 
-interface OrderSummaryProps {
-  subtotal: number;
-  discount: number;
-  deliveryFee: number;
-  total: number;
+function TextField({ id, label, value, error, autoComplete, onChange }: { id: string; label: string; value: string; error?: string; autoComplete: string; onChange: (value: string) => void }) {
+  const errorId = `${id}-error`; return <label className="field" htmlFor={id}><span>{label}</span><input id={id} value={value} autoComplete={autoComplete} aria-invalid={Boolean(error)} aria-describedby={error ? errorId : undefined} onChange={(e) => onChange(e.target.value)} />{error && <small className="field-error" id={errorId}>{error}</small>}</label>;
 }
-
-function OrderSummary({ subtotal, discount, deliveryFee, total }: OrderSummaryProps) {
-  return (
-    <section className="summary" aria-label="Итог заказа">
-      <SummaryRow label="Товары" value={subtotal} />
-      <SummaryRow label="Скидка" value={-discount} />
-      <SummaryRow label="Доставка" value={deliveryFee} />
-      <div className="summary-total">
-        <span>Итого</span>
-        <strong>{formatPrice(total)}</strong>
-      </div>
-    </section>
-  );
-}
-
-function SummaryRow({ label, value }: { label: string; value: number }) {
-  return (
-    <div className="summary-row">
-      <span>{label}</span>
-      <strong>{formatPrice(value)}</strong>
-    </div>
-  );
-}
-
-function StatusPill({ status }: { status: OrderStatus }) {
-  return <span className={`status-pill ${statusMeta[status].tone}`}>{statusMeta[status].title}</span>;
-}
-
-function OrderTracking({ status }: { status: OrderStatus }) {
-  const activeIndex = statusFlow.indexOf(status);
-
-  return (
-    <div className="tracking-steps" aria-label="Статус заказа">
-      {statusFlow.map((item, index) => (
-        <span className={index <= activeIndex ? 'active' : ''} key={item}>
-          {statusMeta[item].title}
-        </span>
-      ))}
-    </div>
-  );
-}
-
-function SectionTitle({ title, subtitle }: { title: string; subtitle: string }) {
-  return (
-    <header className="section-title">
-      <h2>{title}</h2>
-      <p>{subtitle}</p>
-    </header>
-  );
-}
-
-function EmptyState({ title, text }: { title: string; text: string }) {
-  return (
-    <section className="empty-state">
-      <strong>{title}</strong>
-      <span>{text}</span>
-    </section>
-  );
-}
-
-function ImageFallback({ src, title, className }: { src: string; title: string; className: string }) {
-  const [failed, setFailed] = useState(false);
-  const initials = title
-    .split(' ')
-    .slice(0, 2)
-    .map((part) => part[0])
-    .join('')
-    .toUpperCase();
-
-  if (failed) {
-    return (
-      <div className={`${className} image-fallback`} aria-label={title}>
-        <span>{initials}</span>
-      </div>
-    );
-  }
-
-  return <img className={className} src={src} alt={title} onError={() => setFailed(true)} />;
-}
+function OrderSummary({ subtotal, discount, deliveryFee, total }: { subtotal: number; discount: number; deliveryFee: number; total: number }) { return <section className="summary" aria-label="Итог заказа"><Summary label="Товары" value={subtotal} /><Summary label="Скидка от 4 000 ₽" value={-discount} /><Summary label="Доставка" value={deliveryFee} /><div className="summary-total"><span>Итого</span><strong>{formatPrice(total)}</strong></div></section>; }
+function Summary({ label, value }: { label: string; value: number }) { return <div className="summary-row"><span>{label}</span><strong>{value === 0 ? '0 ₽' : formatPrice(value)}</strong></div>; }
+function StatusPill({ status }: { status: OrderStatus }) { return <span className={`status-pill ${statusMeta[status].tone}`}>{statusMeta[status].title}</span>; }
+function OrderTracking({ order }: { order: Order }) { return <section className="activity-timeline" aria-label="История заказа"><h3>Активность</h3>{[...order.activity].reverse().map((item) => <div key={item.id}><i /><span><strong>{item.title}</strong><small>{formatDate(item.createdAt)} · {item.source === 'merchant' ? 'магазин' : item.source === 'customer' ? 'покупатель' : 'демо'}</small><p>{item.note}</p></span></div>)}</section>; }
+function SectionTitle({ index, title, subtitle }: { index: string; title: string; subtitle: string }) { return <header className="section-title"><span>{index}</span><div><h1>{title}</h1><p>{subtitle}</p></div></header>; }
+function EmptyState({ title, text, action, onAction }: { title: string; text: string; action?: string; onAction?: () => void }) { return <section className="empty-state"><strong>{title}</strong><span>{text}</span>{action && onAction && <button className="secondary-button" onClick={onAction}>{action}</button>}</section>; }
+function ImageFallback({ src, title, className }: { src: string; title: string; className: string }) { const [failed, setFailed] = useState(false); return failed ? <div className={`${className} image-fallback`} aria-label={title || undefined}><span>К</span></div> : <img className={className} src={src} alt={title} onError={() => setFailed(true)} />; }
 
 export default App;

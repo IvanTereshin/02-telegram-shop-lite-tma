@@ -50,4 +50,9 @@ export const statusMeta: Record<OrderStatus, { title: string; tone: string; botT
     tone: 'gray',
     botText: 'Заказ закрыт. Можно повторить покупку из истории.',
   },
+  cancelled: {
+    title: 'Отменён',
+    tone: 'red',
+    botText: 'Заказ отменён до начала сборки.',
+  },
 };
